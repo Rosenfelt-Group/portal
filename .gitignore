@@ -1,0 +1,7 @@
+node_modules
+.next
+.env*
+.vercel
+.superpowers
+*.tsbuildinfo
+next-env.d.ts
