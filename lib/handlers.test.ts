@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { handleOpen, handleIdentify, handleDeliverables, handlePreviewUrl, requireSession, type Deps } from "./handlers";
+import { handleOpen, handleIdentify, handleDeliverables, handlePreviewUrl, requireSession, depsFromEnv, type Deps } from "./handlers";
 import { signSession, verifySession, COOKIE_NAME } from "./session";
 import { hashToken } from "./token";
 import { verifyGrant } from "./grant";
@@ -178,6 +178,69 @@ describe("handlePreviewUrl", () => {
     const prefix = `${E}/${A}/v2`;
     for (const entry of ["../x.html", "", "a//b.html", ".hidden.html", null]) {
       const { d } = deps((t) => withContact(t) ?? [{ storage_prefix: prefix, entry, deliverable_id: A, version_no: 2 }]);
+      const { url } = await (await handlePreviewUrl(goodCookie({ cid: C }), V, d)).json();
+      expect(url.endsWith("/index.html")).toBe(true);
+    }
+  });
+});
+
+describe("fail closed when the database throws", () => {
+  const boom = () => { throw new Error("db down"); };
+  const mk = () => deps(boom).d;
+  const idReq = new Request(`${ORIGIN}/api/room/identify`, { method: "POST", headers: { origin: ORIGIN, "content-type": "application/json" }, body: JSON.stringify({ name: "Pat", email: "pat@x.co" }) });
+  it("requireSession returns null", async () => {
+    expect(await requireSession(goodCookie(), mk())).toBeNull();
+  });
+  it("handleOpen redirects to /link-expired without a cookie", async () => {
+    const r = await handleOpen(TOKEN, mk());
+    expect(r.status).toBe(303);
+    expect(r.headers.get("location")).toBe("/link-expired");
+    expect(r.headers.get("set-cookie")).toBeNull();
+  });
+  it("handleIdentify does not succeed or set a cookie", async () => {
+    const r = await handleIdentify(idReq, goodCookie(), mk());
+    expect(r.status).not.toBe(200);
+    expect(r.headers.get("set-cookie")).toBeNull();
+  });
+  it("handleIdentify fails when identify itself throws after a valid session", async () => {
+    const { d } = deps((t) => { if (t.includes("portal_session")) return [header]; throw new Error("x"); });
+    const r = await handleIdentify(idReq, goodCookie(), d);
+    expect(r.status).not.toBe(200);
+    expect(r.headers.get("set-cookie")).toBeNull();
+  });
+  it("handleDeliverables is non-200", async () => {
+    expect((await handleDeliverables(goodCookie({ cid: C }), mk())).status).not.toBe(200);
+  });
+  it("handlePreviewUrl is 404 when the preview lookup throws", async () => {
+    const { d } = deps((t) => { if (t.includes("portal_session")) return [{ ...header, contact_id: C }]; throw new Error("x"); });
+    expect((await handlePreviewUrl(goodCookie({ cid: C }), V, d)).status).toBe(404);
+  });
+});
+
+describe("handleOpen misconfiguration", () => {
+  it("makes no query when sessionSecret is empty", async () => {
+    const { d, calls } = deps(() => [header]);
+    const r = await handleOpen(TOKEN, { ...d, sessionSecret: "" });
+    expect(r.headers.get("location")).toBe("/link-expired");
+    expect(calls).toEqual([]);
+  });
+  it("depsFromEnv does not throw without PORTAL_DATABASE_URL and fails closed", async () => {
+    const saved = process.env.PORTAL_DATABASE_URL;
+    delete process.env.PORTAL_DATABASE_URL;
+    try {
+      const d = depsFromEnv();
+      const r = await handleOpen(TOKEN, { ...d, sessionSecret: SESSION_SECRET });
+      expect(r.status).toBe(303);
+      expect(r.headers.get("location")).toBe("/link-expired");
+    } finally { if (saved !== undefined) process.env.PORTAL_DATABASE_URL = saved; }
+  });
+});
+
+describe("entry path fallbacks", () => {
+  it("falls back to index.html for dotted segments and trailing slash", async () => {
+    const prefix = `${E}/${A}/v2`;
+    for (const entry of ["a/.x.html", "./x", "a/"]) {
+      const { d } = deps((t) => (t.includes("portal_session") ? [{ ...header, contact_id: C }] : [{ storage_prefix: prefix, entry, deliverable_id: A, version_no: 2 }]));
       const { url } = await (await handlePreviewUrl(goodCookie({ cid: C }), V, d)).json();
       expect(url.endsWith("/index.html")).toBe(true);
     }

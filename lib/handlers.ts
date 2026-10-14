@@ -11,7 +11,8 @@ export interface Deps {
 
 export function depsFromEnv(): Deps {
   return {
-    q: getQ(),
+    // Lazy: getQ() throws if PORTAL_DATABASE_URL is unset; defer so handlers' try/catch fail closed.
+    q: ((strings: TemplateStringsArray, ...values: unknown[]) => getQ()(strings, ...values)) as Q,
     sessionSecret: process.env.ROOM_SESSION_SECRET ?? "",
     grantSecret: process.env.ROOM_GRANT_SECRET ?? "",
     previewUrl: (process.env.NEXT_PUBLIC_PREVIEW_URL ?? "https://preview.rosably.com").replace(/\/+$/, ""),
@@ -32,9 +33,10 @@ const expired = () => new Response(null, { status: 303, headers: { Location: "/l
 
 export async function handleOpen(token: string, d: Deps): Promise<Response> {
   if (!isTokenShape(token)) return expired();
+  if (!d.sessionSecret) return expired();
   let row: RoomHeader | null;
   try { row = await openRoom(d.q, hashToken(token)); } catch { return expired(); }
-  if (!row || !d.sessionSecret) return expired();
+  if (!row) return expired();
   const exp = sessionExpiry(row.expires_at, nowMs(d));
   const value = signSession({ aid: row.access_id, eid: row.engagement_id, exp }, d.sessionSecret);
   return new Response(null, {
