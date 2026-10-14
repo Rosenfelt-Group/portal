@@ -2,13 +2,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { main, button, card } from "./room-styles";
 
-interface Version {
+export interface Version {
   id: string; version_no: number; status: string; shared_at: string | null;
   change_summary: string | null; screens: { id: string; name: string }[];
 }
 interface Deliverable { id: string; title: string; description: string | null; versions: Version[] }
-
-const REFRESH_MS = 10 * 60 * 1000;
 
 export function welcomeText(relationship: string): string {
   switch (relationship) {
@@ -27,11 +25,32 @@ export function FrameLabel() {
   );
 }
 
-function SolutionCard({ d }: { d: Deliverable }) {
-  const versions = [...d.versions].sort((a, b) => b.version_no - a.version_no);
+export function sortVersions(versions: Version[]): Version[] {
+  return [...versions].sort((a, b) => b.version_no - a.version_no);
+}
+
+export function PreviewFrame({ url }: { url: string }) {
+  return (
+    // SECURITY: never add allow-same-origin (or top-navigation, popups, modals, downloads) here.
+    <iframe src={url} sandbox="allow-scripts allow-forms" referrerPolicy="no-referrer"
+      title="Prototype preview"
+      style={{ width: "100%", height: "70vh", border: "1px solid #d0d5dd", borderRadius: 8 }} />
+  );
+}
+
+// Why there is no background refresh of the preview URL: the grant is part of the path
+// (/v/<grant>/<entry>) and the preview host checks it on every request, so relative assets load
+// under the same grant. Swapping the src would reload the prototype and lose the visitor's place,
+// so the src stays fixed while the page is open and changes only when the visitor picks another
+// version or presses "Reload preview". Cross-origin iframes give no reliable failure signal, so
+// that button is always shown; it fetches a fresh grant (needed after ~15 minutes if lazily
+// loaded assets or an in-frame reload start failing).
+function SolutionCard({ d, onSessionEnded }: { d: Deliverable; onSessionEnded: () => void }) {
+  const versions = sortVersions(d.versions);
   const [versionId, setVersionId] = useState(versions[0]?.id ?? "");
   const [url, setUrl] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [nonce, setNonce] = useState(0);
   const current = versions.find(v => v.id === versionId);
 
   useEffect(() => {
@@ -39,20 +58,19 @@ function SolutionCard({ d }: { d: Deliverable }) {
     let cancelled = false;
     setUrl(null);
     setErr(null);
-    async function load(silent: boolean) {
+    (async () => {
       try {
         const res = await fetch(`/api/room/versions/${encodeURIComponent(versionId)}/preview-url`);
+        if (res.status === 401) { if (!cancelled) onSessionEnded(); return; }
         if (!res.ok) throw new Error(String(res.status));
         const data = await res.json();
         if (!cancelled && typeof data.url === "string") setUrl(data.url);
       } catch {
-        if (!cancelled && !silent) setErr("This preview isn't available right now.");
+        if (!cancelled) setErr("This preview isn't available right now.");
       }
-    }
-    void load(false);
-    const timer = setInterval(() => { void load(true); }, REFRESH_MS);
-    return () => { cancelled = true; clearInterval(timer); };
-  }, [versionId]);
+    })();
+    return () => { cancelled = true; };
+  }, [versionId, nonce, onSessionEnded]);
 
   return (
     <section style={card}>
@@ -67,12 +85,9 @@ function SolutionCard({ d }: { d: Deliverable }) {
       {current?.change_summary && <p>{current.change_summary}</p>}
       <FrameLabel />
       {err && <p role="alert" style={{ color: "#b42318" }}>{err}</p>}
-      {url && (
-        // SECURITY: never add allow-same-origin (or top-navigation, popups, modals, downloads) here.
-        <iframe src={url} sandbox="allow-scripts allow-forms" referrerPolicy="no-referrer"
-          title="Prototype preview"
-          style={{ width: "100%", height: "70vh", border: "1px solid #d0d5dd", borderRadius: 8 }} />
-      )}
+      {url && <PreviewFrame url={url} />}
+      <button type="button" style={{ ...button, marginTop: "0.75rem", padding: "0.4rem 1rem", fontSize: "0.9rem" }}
+        onClick={() => setNonce(n => n + 1)}>Reload preview</button>
     </section>
   );
 }
@@ -103,6 +118,7 @@ export function RoomView({ title, orgName, relationship, contactName }: {
   }, []);
 
   useEffect(() => { void load(); }, [load]);
+  const onSessionEnded = useCallback(() => setExpired(true), []);
 
   return (
     <main style={{ ...main, maxWidth: 960, textAlign: "left" }}>
@@ -123,7 +139,7 @@ export function RoomView({ title, orgName, relationship, contactName }: {
       {items && items.length === 0 && (
         <p>Nothing has been shared yet. We&apos;ll let you know when there&apos;s something to review.</p>
       )}
-      {items?.map(d => <SolutionCard key={d.id} d={d} />)}
+      {items?.map(d => <SolutionCard key={d.id} d={d} onSessionEnded={onSessionEnded} />)}
     </main>
   );
 }

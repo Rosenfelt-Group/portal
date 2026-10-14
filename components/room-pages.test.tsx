@@ -36,3 +36,42 @@ describe("room view helpers", () => {
     expect(welcomeText("whatever")).toBeTruthy();
   });
 });
+
+import { PreviewFrame, sortVersions, type Version } from "@/components/RoomView";
+import nextConfig from "@/next.config";
+
+describe("preview frame", () => {
+  const html = renderToStaticMarkup(<PreviewFrame url="https://preview.rosably.com/v/g/index.html" />);
+  it("is sandboxed exactly and never gets same-origin", () => {
+    expect(html).toContain('sandbox="allow-scripts allow-forms"');
+    expect(html).toContain('referrerPolicy="no-referrer"');
+    expect(html).not.toContain("allow-same-origin");
+    expect(html).toContain('src="https://preview.rosably.com/v/g/index.html"');
+  });
+});
+
+describe("sortVersions", () => {
+  it("orders newest first numerically", () => {
+    const v = (n: number) => ({ id: String(n), version_no: n } as Version);
+    expect(sortVersions([v(9), v(10), v(2)]).map(x => x.version_no)).toEqual([10, 9, 2]);
+  });
+});
+
+describe("next.config headers", () => {
+  it("sets the security headers and no-store on room routes", async () => {
+    const rules = await nextConfig.headers!();
+    const forSource = (src: string) => rules.find(r => r.source === src)!.headers;
+    const all = Object.fromEntries(forSource("/:path*").map(h => [h.key, h.value]));
+    const csp = all["Content-Security-Policy"];
+    expect(csp).toContain("frame-ancestors 'none'");
+    expect(csp).toContain("frame-src https://preview.rosably.com;");
+    expect(csp).toContain("base-uri 'none'");
+    expect(csp).toContain("object-src 'none'");
+    expect(csp).toContain("form-action 'self'");
+    expect(all["X-Frame-Options"]).toBe("DENY");
+    expect(all["Referrer-Policy"]).toBe("no-referrer");
+    for (const src of ["/room", "/r/:path*", "/link-expired", "/api/:path*"]) {
+      expect(forSource(src)).toContainEqual({ key: "Cache-Control", value: "private, no-store" });
+    }
+  });
+});

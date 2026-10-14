@@ -15,7 +15,7 @@ export function depsFromEnv(): Deps {
     q: ((strings: TemplateStringsArray, ...values: unknown[]) => getQ()(strings, ...values)) as Q,
     sessionSecret: process.env.ROOM_SESSION_SECRET ?? "",
     grantSecret: process.env.ROOM_GRANT_SECRET ?? "",
-    previewUrl: (process.env.NEXT_PUBLIC_PREVIEW_URL ?? "https://preview.rosably.com").replace(/\/+$/, ""),
+    previewUrl: (process.env.NEXT_PUBLIC_PREVIEW_URL || "https://preview.rosably.com").replace(/\/+$/, ""),
     portalOrigin: process.env.PORTAL_ORIGIN ?? "https://portal.rosably.com",
   };
 }
