@@ -1,13 +1,20 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // No DOM in this suite: hooks are stubbed so components can be called directly,
 // effects are captured and run by hand, and click handlers are found in the element tree.
 const effects: Array<() => unknown> = [];
+let seeds: unknown[] = [];
+let seedIdx = 0;
 vi.mock("react", async () => {
   const actual = await vi.importActual<typeof import("react")>("react");
   const api = {
     ...actual,
-    useState: (i: unknown) => [typeof i === "function" ? (i as () => unknown)() : i, () => {}],
+    useState: (i: unknown) => {
+      const seeded = seedIdx < seeds.length && seeds[seedIdx] !== undefined;
+      const val = seeded ? seeds[seedIdx] : typeof i === "function" ? (i as () => unknown)() : i;
+      seedIdx++;
+      return [val, () => {}];
+    },
     useRef: (i: unknown) => ({ current: i }),
     useCallback: (f: unknown) => f,
     useEffect: (f: () => unknown) => { effects.push(f); },
@@ -32,9 +39,29 @@ function findButton(node: unknown): { props: { onClick: () => void } } | null {
   return null;
 }
 
+type El = { type?: unknown; props?: Record<string, unknown> };
+function findAll(node: unknown, pred: (e: El) => boolean, out: El[] = []): El[] {
+  if (Array.isArray(node)) { node.forEach(k => findAll(k, pred, out)); return out; }
+  if (!node || typeof node !== "object") return out;
+  const e = node as El;
+  if (pred(e)) out.push(e);
+  findAll(e.props?.children, pred, out);
+  return out;
+}
+// RoomView state order: items, error, expired.
+function room(mode: "visitor" | "preview" | undefined, state: { items?: unknown; expired?: boolean }) {
+  seeds = [state.items, undefined, state.expired]; seedIdx = 0;
+  const props = { title: "T", orgName: "O", relationship: "prospect", contactName: "" };
+  const tree = RoomView(mode ? { ...props, mode } : props);
+  seeds = [];
+  return tree;
+}
+
 let fetchMock: ReturnType<typeof vi.fn>;
+afterEach(() => { vi.unstubAllGlobals(); seeds = []; });
 beforeEach(() => {
   effects.length = 0;
+  seeds = []; seedIdx = 0;
   fetchMock = vi.fn(async () => new Response(JSON.stringify({ deliverables: [], url: "https://x.example/d" }), { status: 200 }));
   vi.stubGlobal("fetch", fetchMock);
 });
@@ -95,5 +122,34 @@ describe("draft labels and preview copy", () => {
   it("words the ended session by mode", () => {
     expect(renderToStaticMarkup(<SessionEnded mode="preview" />)).toContain("Your preview ended. Use “Preview room” in the dashboard to open it again.");
     expect(renderToStaticMarkup(<SessionEnded mode="visitor" />)).toContain("Your session ended after 2 hours");
+  });
+});
+
+describe("prop wiring", () => {
+  const cards = (tree: unknown) => findAll(tree, e => e.type === SolutionCard || e.type === DocumentCard);
+  it("DeliverableList passes api to both card kinds", () => {
+    for (const api of [undefined, "/api/preview"]) {
+      const found = cards(DeliverableList({ items: [proto(), doc()], onSessionEnded: noop, ...(api ? { api } : {}) }));
+      expect(found.map(e => e.type)).toEqual([SolutionCard, DocumentCard]);
+      for (const e of found) expect(e.props!.api).toBe(api ?? "/api/room");
+    }
+  });
+  it("RoomView passes api and preview to DeliverableList in both modes", () => {
+    const items = [proto(), doc()];
+    for (const [mode, api, preview] of [["preview", "/api/preview", true], ["visitor", "/api/room", false], [undefined, "/api/room", false]] as const) {
+      const [list] = findAll(room(mode, { items }), e => e.type === DeliverableList);
+      expect(list.props!.api).toBe(api);
+      expect(list.props!.preview).toBe(preview);
+      expect(list.props!.items).toBe(items);
+    }
+  });
+  it("RoomView renders SessionEnded with its mode when the session expired", () => {
+    for (const [mode, text] of [["preview", "Your preview ended."], ["visitor", "Your session ended after 2 hours"]] as const) {
+      const tree = room(mode, { expired: true });
+      const [ended] = findAll(tree, e => e.type === SessionEnded);
+      expect(ended.props!.mode).toBe(mode);
+      expect(renderToStaticMarkup(<SessionEnded mode={ended.props!.mode as "visitor" | "preview"} />)).toContain(text);
+    }
+    expect(findAll(room("preview", {}), e => e.type === SessionEnded)).toHaveLength(0);
   });
 });
