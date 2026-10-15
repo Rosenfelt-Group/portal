@@ -12,7 +12,7 @@ interface Deliverable { id: string; title: string; description: string | null; k
 
 export function versionLabel(v: Version, timeZone?: string): string {
   const date = v.created_at ? formatVersionDate(v.created_at, timeZone) : "";
-  return `v${v.version_no}${date ? ` · ${date}` : ""}${v.status === "superseded" ? " (older)" : ""}`;
+  return `v${v.version_no}${date ? ` · ${date}` : ""}${v.status === "superseded" ? " (older)" : ""}${v.status === "draft" ? " (draft)" : ""}`;
 }
 
 // Plain text only: React escapes it; pre-line keeps the line breaks Brian typed.
@@ -60,7 +60,7 @@ export function PreviewFrame({ url }: { url: string }) {
 // version or presses "Reload preview". Cross-origin iframes give no reliable failure signal, so
 // that button is always shown; it fetches a fresh grant (needed after ~15 minutes if lazily
 // loaded assets or an in-frame reload start failing).
-function SolutionCard({ d, onSessionEnded }: { d: Deliverable; onSessionEnded: () => void }) {
+export function SolutionCard({ d, onSessionEnded, api = "/api/room" }: { d: Deliverable; onSessionEnded: () => void; api?: string }) {
   const versions = sortVersions(d.versions);
   const [versionId, setVersionId] = useState(versions[0]?.id ?? "");
   const [url, setUrl] = useState<string | null>(null);
@@ -75,7 +75,7 @@ function SolutionCard({ d, onSessionEnded }: { d: Deliverable; onSessionEnded: (
     setErr(null);
     (async () => {
       try {
-        const res = await fetch(`/api/room/versions/${encodeURIComponent(versionId)}/preview-url`);
+        const res = await fetch(`${api}/versions/${encodeURIComponent(versionId)}/preview-url`);
         if (res.status === 401) { if (!cancelled) onSessionEnded(); return; }
         if (!res.ok) throw new Error(String(res.status));
         const data = await res.json();
@@ -85,7 +85,7 @@ function SolutionCard({ d, onSessionEnded }: { d: Deliverable; onSessionEnded: (
       }
     })();
     return () => { cancelled = true; };
-  }, [versionId, nonce, onSessionEnded]);
+  }, [versionId, nonce, onSessionEnded, api]);
 
   return (
     <section style={card}>
@@ -110,7 +110,7 @@ function SolutionCard({ d, onSessionEnded }: { d: Deliverable; onSessionEnded: (
 
 // Documents are only ever downloaded (attachment from the preview host), never shown in this page.
 // The signed URL is fetched on click (it lives 2 minutes), used once for navigation and never logged or stored.
-export function DocumentCard({ d, onSessionEnded }: { d: Deliverable; onSessionEnded: () => void }) {
+export function DocumentCard({ d, onSessionEnded, api = "/api/room" }: { d: Deliverable; onSessionEnded: () => void; api?: string }) {
   const versions = sortVersions(d.versions);
   const [versionId, setVersionId] = useState(versions[0]?.id ?? "");
   const [busy, setBusy] = useState(false);
@@ -123,7 +123,7 @@ export function DocumentCard({ d, onSessionEnded }: { d: Deliverable; onSessionE
     if (!versionId || inFlight.current) return;
     inFlight.current = true; setBusy(true); setErr(null);
     try {
-      const res = await fetch(`/api/room/versions/${encodeURIComponent(versionId)}/document-url`, {
+      const res = await fetch(`${api}/versions/${encodeURIComponent(versionId)}/document-url`, {
         method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
       });
       if (res.status === 401) { onSessionEnded(); return; }
@@ -161,19 +161,34 @@ export function DocumentCard({ d, onSessionEnded }: { d: Deliverable; onSessionE
 }
 
 // Everything visible in the room: prototypes and documents. The empty message shows only when nothing is.
-export function DeliverableList({ items, onSessionEnded }: { items: Deliverable[]; onSessionEnded: () => void }) {
+export function DeliverableList({ items, onSessionEnded, api = "/api/room", preview = false }: {
+  items: Deliverable[]; onSessionEnded: () => void; api?: string; preview?: boolean;
+}) {
   const visible = items.filter(d => Array.isArray(d.versions) && d.versions.length > 0);
   if (visible.length === 0) {
-    return <p>Nothing has been shared yet. We&apos;ll let you know when there&apos;s something to review.</p>;
+    return preview
+      ? <p>No deliverables have been added yet.</p>
+      : <p>Nothing has been shared yet. We&apos;ll let you know when there&apos;s something to review.</p>;
   }
   return <>{visible.map(d => d.kind === "document"
-    ? <DocumentCard key={d.id} d={d} onSessionEnded={onSessionEnded} />
-    : <SolutionCard key={d.id} d={d} onSessionEnded={onSessionEnded} />)}</>;
+    ? <DocumentCard key={d.id} d={d} onSessionEnded={onSessionEnded} api={api} />
+    : <SolutionCard key={d.id} d={d} onSessionEnded={onSessionEnded} api={api} />)}</>;
 }
 
-export function RoomView({ title, orgName, relationship, contactName }: {
-  title: string; orgName: string; relationship: string; contactName: string;
+export function SessionEnded({ mode }: { mode: "visitor" | "preview" }) {
+  return (
+    <p role="alert">
+      {mode === "preview"
+        ? "Your preview ended. Use “Preview room” in the dashboard to open it again."
+        : "Your session ended after 2 hours without activity (or 8 hours in total). Open your room link again to continue."}
+    </p>
+  );
+}
+
+export function RoomView({ title, orgName, relationship, contactName, mode = "visitor" }: {
+  title: string; orgName: string; relationship: string; contactName: string; mode?: "visitor" | "preview";
 }) {
+  const api = mode === "preview" ? "/api/preview" : "/api/room";
   const [items, setItems] = useState<Deliverable[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [expired, setExpired] = useState(false);
@@ -184,7 +199,7 @@ export function RoomView({ title, orgName, relationship, contactName }: {
     inFlight.current = true;
     setError(null);
     try {
-      const res = await fetch("/api/room/deliverables");
+      const res = await fetch(`${api}/deliverables`);
       if (res.status === 401) { setExpired(true); return; }
       if (!res.ok) throw new Error(String(res.status));
       const data = await res.json();
@@ -194,28 +209,29 @@ export function RoomView({ title, orgName, relationship, contactName }: {
     } finally {
       inFlight.current = false;
     }
-  }, []);
+  }, [api]);
 
   useEffect(() => { void load(); }, [load]);
   const onSessionEnded = useCallback(() => setExpired(true), []);
 
   return (
     <main style={{ ...main, maxWidth: 960, textAlign: "left" }}>
+      {mode === "preview" && (
+        <p role="status" style={{ background: "#fffaeb", border: "1px solid #fec84b", borderRadius: 8, padding: "0.5rem 0.75rem", margin: "0 0 1rem", color: "#7a2e0e", fontSize: "0.9rem" }}>
+          Preview — this is what visitors will see once drafts are shared. Draft versions are marked “(draft)”. Nothing you do here is recorded.
+        </p>
+      )}
       <p style={{ margin: 0, color: "#475467" }}>{orgName}</p>
       <h1 style={{ lineHeight: 1.25, marginTop: 0 }}>{title}</h1>
       {contactName && <p>Hello, {contactName}</p>}
       <p>{welcomeText(relationship)}</p>
-      {expired && (
-        <p role="alert">
-          Your session ended after 2 hours without activity (or 8 hours in total). Open your room link again to continue.
-        </p>
-      )}
+      {expired && <SessionEnded mode={mode} />}
       {error && (
         <p role="alert">
           {error} <button type="button" style={{ ...button, marginTop: 0 }} onClick={() => { void load(); }}>Retry</button>
         </p>
       )}
-      {items && <DeliverableList items={items} onSessionEnded={onSessionEnded} />}
+      {items && <DeliverableList items={items} onSessionEnded={onSessionEnded} api={api} preview={mode === "preview"} />}
     </main>
   );
 }

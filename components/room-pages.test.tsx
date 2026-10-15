@@ -145,7 +145,7 @@ describe("next.config headers", () => {
     expect(csp).toContain("form-action 'self'");
     expect(all["X-Frame-Options"]).toBe("DENY");
     expect(all["Referrer-Policy"]).toBe("no-referrer");
-    for (const src of ["/room", "/r/:path*", "/link-expired", "/api/:path*"]) {
+    for (const src of ["/room", "/r/:path*", "/link-expired", "/preview", "/preview/:path*", "/api/:path*"]) {
       expect(forSource(src)).toContainEqual({ key: "Cache-Control", value: "private, no-store" });
     }
   });
