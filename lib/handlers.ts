@@ -21,15 +21,15 @@ export function depsFromEnv(): Deps {
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-const nowMs = (d: Deps) => (d.now ? d.now() : Date.now());
+export const nowMs = (d: Deps) => (d.now ? d.now() : Date.now());
 
-const json = (body: unknown, status: number, extra: Record<string, string> = {}) =>
+export const json = (body: unknown, status: number, extra: Record<string, string> = {}) =>
   new Response(JSON.stringify(body), {
     status,
     headers: { "Content-Type": "application/json", "Cache-Control": "private, no-store", ...extra },
   });
 
-const expired = () => new Response(null, { status: 303, headers: { Location: "/link-expired", "Cache-Control": "private, no-store" } });
+export const expired = () => new Response(null, { status: 303, headers: { Location: "/link-expired", "Cache-Control": "private, no-store" } });
 
 // Signs a renewed session cookie (sliding idle timeout, capped at st + 8h and the link expiry).
 function sessionCookie(p: { aid: string; eid: string; cid?: string; st: number }, linkExpiresAt: string | Date, d: Deps): string | null {
@@ -88,6 +88,10 @@ export async function handleDeliverables(cookie: string | undefined, d: Deps): P
   if (!sess || !sess.row.contact_id) return json({ error: "Session expired." }, 401);
   let rows: DeliverableRow[];
   try { rows = await listDeliverables(d.q, sess.s.aid, sess.s.eid); } catch { return json({ error: "Not available." }, 500, { "Set-Cookie": sess.renewed }); }
+  return json({ deliverables: groupDeliverables(rows) }, 200, { "Set-Cookie": sess.renewed });
+}
+
+export function groupDeliverables(rows: DeliverableRow[]) {
   const byId = new Map<string, { id: string; title: string; description: string | null; kind: string; welcome_message: string | null; versions: unknown[] }>();
   for (const r of rows) {
     if (!byId.has(r.deliverable_id)) {
@@ -104,7 +108,7 @@ export async function handleDeliverables(cookie: string | undefined, d: Deps): P
       change_summary: r.change_summary, screens: Array.isArray(r.screens) ? r.screens : [], document: docInfo(r.document),
     });
   }
-  return json({ deliverables: [...byId.values()] }, 200, { "Set-Cookie": sess.renewed });
+  return [...byId.values()];
 }
 
 // Whitelists the document fields so nothing internal (storage path, manifest extras) reaches the browser.
@@ -124,7 +128,7 @@ function isoOrNull(v: unknown): string | null {
   return typeof v === "string" ? v : new Date(t).toISOString();
 }
 
-function entryPath(entry: unknown): string {
+export function entryPath(entry: unknown): string {
   if (typeof entry !== "string" || !entry) return "index.html";
   const segs = entry.split("/");
   if (segs.some(s => s === "" || s === "." || s === ".." || s.startsWith("."))) return "index.html";
@@ -151,7 +155,7 @@ function normExt(name: string): string | null {
   const e = m[1].toLowerCase();
   return e === "jpeg" ? "jpg" : e;
 }
-function downloadName(file: string, filename: unknown): string {
+export function downloadName(file: string, filename: unknown): string {
   if (!isSafeDocFilename(filename)) return file;
   const want = normExt(file);
   return want !== null && normExt(filename) === want ? filename : file;

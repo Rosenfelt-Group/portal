@@ -44,3 +44,18 @@ export async function documentForDownload(q: Q, aid: string, eid: string, cid: s
   const rows = await q<DocumentRow>`select * from rooms.portal_document_for_download(${aid}::uuid, ${eid}::uuid, ${cid ?? null}::uuid, ${versionId}::uuid)`;
   return rows[0] ?? null;
 }
+
+export interface PreviewRoomRow { engagement_id: string; title: string; relationship: string; org_name: string; status: string }
+export interface PreviewVersionRow { kind: "prototype" | "document"; storage_prefix: string; entry: string | null; file: string | null; filename: string | null }
+
+export async function previewRoom(q: Q, eid: string): Promise<PreviewRoomRow | null> {
+  const rows = await q<PreviewRoomRow>`select * from rooms.preview_room(${eid}::uuid)`;
+  return rows[0] ?? null;
+}
+export async function previewListDeliverables(q: Q, eid: string): Promise<DeliverableRow[]> {
+  return q<DeliverableRow>`select * from rooms.preview_list_deliverables(${eid}::uuid)`;
+}
+export async function previewVersion(q: Q, eid: string, versionId: string): Promise<PreviewVersionRow | null> {
+  const rows = await q<PreviewVersionRow>`select * from rooms.preview_version(${eid}::uuid, ${versionId}::uuid)`;
+  return rows[0] ?? null;
+}
