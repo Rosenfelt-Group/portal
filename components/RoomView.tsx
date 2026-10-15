@@ -128,7 +128,7 @@ export function RoomView({ title, orgName, relationship, contactName }: {
       <p>{welcomeText(relationship)}</p>
       {expired && (
         <p role="alert">
-          Your session has ended. <a href="/room">Reload this page</a> to continue.
+          Your session ended after 2 hours without activity (or 8 hours in total). Open your room link again to continue.
         </p>
       )}
       {error && (

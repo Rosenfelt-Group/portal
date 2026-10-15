@@ -31,27 +31,38 @@ const json = (body: unknown, status: number, extra: Record<string, string> = {})
 
 const expired = () => new Response(null, { status: 303, headers: { Location: "/link-expired", "Cache-Control": "private, no-store" } });
 
+// Signs a renewed session cookie (sliding idle timeout, capped at st + 8h and the link expiry).
+function sessionCookie(p: { aid: string; eid: string; cid?: string; st: number }, linkExpiresAt: string | Date, d: Deps): string | null {
+  const now = nowMs(d);
+  const exp = sessionExpiry(linkExpiresAt, p.st, now);
+  if (!Number.isInteger(exp) || exp * 1000 <= now) return null;
+  const payload: SessionPayload = p.cid ? { aid: p.aid, eid: p.eid, cid: p.cid, st: p.st, exp } : { aid: p.aid, eid: p.eid, st: p.st, exp };
+  return setCookieHeader(signSession(payload, d.sessionSecret), exp - Math.floor(now / 1000));
+}
+
 export async function handleOpen(token: string, d: Deps): Promise<Response> {
   if (!isTokenShape(token)) return expired();
   if (!d.sessionSecret) return expired();
   let row: RoomHeader | null;
   try { row = await openRoom(d.q, hashToken(token)); } catch { return expired(); }
   if (!row) return expired();
-  const exp = sessionExpiry(row.expires_at, nowMs(d));
-  const value = signSession({ aid: row.access_id, eid: row.engagement_id, exp }, d.sessionSecret);
+  const st = Math.floor(nowMs(d) / 1000);
+  const setCookie = sessionCookie({ aid: row.access_id, eid: row.engagement_id, st }, row.expires_at, d);
+  if (!setCookie) return expired();
   return new Response(null, {
     status: 303,
-    headers: { Location: "/room", "Cache-Control": "private, no-store", "Set-Cookie": setCookieHeader(value, exp - Math.floor(nowMs(d) / 1000)) },
+    headers: { Location: "/room", "Cache-Control": "private, no-store", "Set-Cookie": setCookie },
   });
 }
 
-export async function requireSession(cookie: string | undefined, d: Deps): Promise<{ s: SessionPayload; row: RoomHeader } | null> {
+export async function requireSession(cookie: string | undefined, d: Deps): Promise<{ s: SessionPayload; row: RoomHeader; renewed: string } | null> {
   const s = verifySession(cookie, d.sessionSecret, nowMs(d));
   if (!s) return null;
-  try {
-    const row = await getSessionRow(d.q, s.aid, s.eid, s.cid);
-    return row ? { s, row } : null;
-  } catch { return null; }
+  let row: RoomHeader | null;
+  try { row = await getSessionRow(d.q, s.aid, s.eid, s.cid); } catch { return null; }
+  if (!row) return null;
+  const renewed = sessionCookie(s, row.expires_at, d);
+  return renewed ? { s, row, renewed } : null;
 }
 
 export async function handleIdentify(req: Request, cookie: string | undefined, d: Deps): Promise<Response> {
@@ -67,15 +78,16 @@ export async function handleIdentify(req: Request, cookie: string | undefined, d
   let cid: string | null;
   try { cid = await identify(d.q, sess.s.aid, sess.s.eid, b.name, b.email); } catch { return bad(); }
   if (!cid) return bad();
-  const value = signSession({ aid: sess.s.aid, eid: sess.s.eid, cid, exp: sess.s.exp }, d.sessionSecret);
-  return json({ ok: true }, 200, { "Set-Cookie": setCookieHeader(value, sess.s.exp - Math.floor(nowMs(d) / 1000)) });
+  const setCookie = sessionCookie({ aid: sess.s.aid, eid: sess.s.eid, cid, st: sess.s.st }, sess.row.expires_at, d);
+  if (!setCookie) return json({ error: "Session expired." }, 401);
+  return json({ ok: true }, 200, { "Set-Cookie": setCookie });
 }
 
 export async function handleDeliverables(cookie: string | undefined, d: Deps): Promise<Response> {
   const sess = await requireSession(cookie, d);
   if (!sess || !sess.row.contact_id) return json({ error: "Session expired." }, 401);
   let rows: DeliverableRow[];
-  try { rows = await listDeliverables(d.q, sess.s.aid, sess.s.eid); } catch { return json({ error: "Not available." }, 500); }
+  try { rows = await listDeliverables(d.q, sess.s.aid, sess.s.eid); } catch { return json({ error: "Not available." }, 500, { "Set-Cookie": sess.renewed }); }
   const byId = new Map<string, { id: string; title: string; description: string | null; versions: unknown[] }>();
   for (const r of rows) {
     if (!byId.has(r.deliverable_id)) byId.set(r.deliverable_id, { id: r.deliverable_id, title: r.deliverable_title, description: r.description, versions: [] });
@@ -84,7 +96,7 @@ export async function handleDeliverables(cookie: string | undefined, d: Deps): P
       change_summary: r.change_summary, screens: r.screens ?? [],
     });
   }
-  return json({ deliverables: [...byId.values()] }, 200);
+  return json({ deliverables: [...byId.values()] }, 200, { "Set-Cookie": sess.renewed });
 }
 
 function entryPath(entry: unknown): string {
@@ -99,9 +111,9 @@ export async function handlePreviewUrl(cookie: string | undefined, versionId: st
   const sess = await requireSession(cookie, d);
   if (!sess || !sess.row.contact_id) return json({ error: "Session expired." }, 401);
   let row;
-  try { row = await versionForPreview(d.q, sess.s.aid, sess.s.eid, sess.s.cid, versionId); } catch { return json({ error: "Not available." }, 404); }
-  if (!row) return json({ error: "Not available." }, 404);
+  try { row = await versionForPreview(d.q, sess.s.aid, sess.s.eid, sess.s.cid, versionId); } catch { return json({ error: "Not available." }, 404, { "Set-Cookie": sess.renewed }); }
+  if (!row) return json({ error: "Not available." }, 404, { "Set-Cookie": sess.renewed });
   let grant: string;
-  try { grant = signGrant(row.storage_prefix, d.grantSecret, nowMs(d)); } catch { return json({ error: "Not available." }, 404); }
-  return json({ url: `${d.previewUrl}/v/${grant}/${entryPath(row.entry)}`, expiresInSec: GRANT_TTL_SEC }, 200);
+  try { grant = signGrant(row.storage_prefix, d.grantSecret, nowMs(d)); } catch { return json({ error: "Not available." }, 404, { "Set-Cookie": sess.renewed }); }
+  return json({ url: `${d.previewUrl}/v/${grant}/${entryPath(row.entry)}`, expiresInSec: GRANT_TTL_SEC }, 200, { "Set-Cookie": sess.renewed });
 }

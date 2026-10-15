@@ -30,7 +30,7 @@ function deps(script: (text: string, values: unknown[]) => unknown[] | undefined
   return { d, calls };
 }
 const cookie = (p: object) => signSession(p as never, SESSION_SECRET);
-const goodCookie = (extra: object = {}) => cookie({ aid: A, eid: E, exp: NOW / 1000 + 3000, ...extra });
+const goodCookie = (extra: object = {}) => cookie({ aid: A, eid: E, st: NOW / 1000 - 60, exp: NOW / 1000 + 3000, ...extra });
 
 describe("handleOpen", () => {
   it("sends malformed tokens to /link-expired without touching the database", async () => {
@@ -62,6 +62,7 @@ describe("handleOpen", () => {
     const value = sc.split(";")[0].slice(COOKIE_NAME.length + 1);
     const p = verifySession(value, SESSION_SECRET, NOW)!;
     expect(p).toMatchObject({ aid: A, eid: E });
+    expect(p.st).toBe(Math.floor(NOW / 1000));
     expect(p.exp).toBe(Math.floor(NOW / 1000) + 3600);
     expect(sc).not.toContain(TOKEN);
     expect(r.headers.get("cache-control")).toBe("private, no-store");
@@ -73,7 +74,7 @@ describe("requireSession", () => {
     const { d, calls } = deps(() => [header]);
     expect(await requireSession(undefined, d)).toBeNull();
     expect(await requireSession("garbage", d)).toBeNull();
-    expect(await requireSession(cookie({ aid: A, eid: E, exp: NOW / 1000 - 10 }), d)).toBeNull();
+    expect(await requireSession(cookie({ aid: A, eid: E, st: NOW / 1000 - 600, exp: NOW / 1000 - 10 }), d)).toBeNull();
     expect(calls).toEqual([]);
   });
   it("rejects a validly signed cookie when the database says the link is no longer valid (revoked)", async () => {
@@ -110,13 +111,13 @@ describe("handleIdentify", () => {
       expect(await r.json()).toEqual({ error: "Please check your name and email." });
     }
   });
-  it("identifies, then re-signs the cookie with the contact and the same expiry", async () => {
+  it("identifies, then re-signs the cookie with the contact and a renewed expiry", async () => {
     const { d } = deps((t) => (t.includes("portal_session") ? [header] : t.includes("portal_identify") ? [{ portal_identify: C }] : []));
     const r = await handleIdentify(req({ name: "Pat", email: "pat@x.co" }), goodCookie(), d);
     expect(r.status).toBe(200);
     expect(await r.json()).toEqual({ ok: true });
     const value = r.headers.get("set-cookie")!.split(";")[0].slice(COOKIE_NAME.length + 1);
-    expect(verifySession(value, SESSION_SECRET, NOW)).toMatchObject({ aid: A, eid: E, cid: C, exp: NOW / 1000 + 3000 });
+    expect(verifySession(value, SESSION_SECRET, NOW)).toMatchObject({ aid: A, eid: E, cid: C, st: NOW / 1000 - 60, exp: NOW / 1000 + 3600 });
   });
   it("returns the same generic 400 when the database rejects the introduction", async () => {
     const { d } = deps((t) => (t.includes("portal_session") ? [header] : [{ portal_identify: null }]));
@@ -244,5 +245,76 @@ describe("entry path fallbacks", () => {
       const { url } = await (await handlePreviewUrl(goodCookie({ cid: C }), V, d)).json();
       expect(url.endsWith("/index.html")).toBe(true);
     }
+  });
+});
+
+describe("sliding session", () => {
+  const farHeader = { ...header, contact_id: C, expires_at: new Date(NOW + 30 * 86_400_000).toISOString() };
+  const valueOf = (r: Response) => r.headers.get("set-cookie")!.split(";")[0].slice(COOKIE_NAME.length + 1);
+  const sessionDeps = (h: object = farHeader) => deps((t) => (t.includes("portal_session") ? [h] : []));
+
+  it("renews the cookie to now + 2 hours on an authenticated API call, keeping the start", async () => {
+    const { d } = sessionDeps();
+    const r = await handleDeliverables(goodCookie({ cid: C, exp: NOW / 1000 + 60 }), d);
+    expect(r.status).toBe(200);
+    const p = verifySession(valueOf(r), SESSION_SECRET, NOW)!;
+    expect(p).toMatchObject({ aid: A, eid: E, cid: C, st: NOW / 1000 - 60, exp: NOW / 1000 + 7200 });
+    expect(r.headers.get("set-cookie")).toContain("Max-Age=7200");
+  });
+  it("never renews past 8 hours from the start", async () => {
+    const st = NOW / 1000 - 7.5 * 3600;
+    const { d } = sessionDeps();
+    const r = await handleDeliverables(goodCookie({ cid: C, st, exp: NOW / 1000 + 60 }), d);
+    expect(verifySession(valueOf(r), SESSION_SECRET, NOW)!.exp).toBe(st + 8 * 3600);
+  });
+  it("never renews past the link expiry when it is sooner than the idle window", async () => {
+    const { d } = sessionDeps({ ...farHeader, expires_at: new Date(NOW + 600_000).toISOString() });
+    const r = await handleDeliverables(goodCookie({ cid: C }), d);
+    expect(verifySession(valueOf(r), SESSION_SECRET, NOW)!.exp).toBe(NOW / 1000 + 600);
+    expect(r.headers.get("set-cookie")).toContain("Max-Age=600");
+  });
+  it("refuses when the link expired in the database, and when it expires exactly now", async () => {
+    for (const ms of [-1000, 0]) {
+      const { d } = sessionDeps({ ...farHeader, expires_at: new Date(NOW + ms).toISOString() });
+      const r = await handleDeliverables(goodCookie({ cid: C }), d);
+      expect(r.status).toBe(401);
+      expect(r.headers.get("set-cookie")).toBeNull();
+    }
+  });
+  it("an idle-expired cookie is refused without a database call (exactly at expiry too)", async () => {
+    for (const off of [-1, 0]) {
+      const { d, calls } = deps(() => [farHeader]);
+      expect((await handleDeliverables(goodCookie({ cid: C, exp: NOW / 1000 + off }), d)).status).toBe(401);
+      expect(calls).toEqual([]);
+    }
+  });
+  it("a Phase 2 cookie (no st) is refused without a database call", async () => {
+    const { d, calls } = deps(() => [farHeader]);
+    expect((await handleDeliverables(cookie({ aid: A, eid: E, cid: C, exp: NOW / 1000 + 600 }), d)).status).toBe(401);
+    expect(calls).toEqual([]);
+  });
+  it("refuses an st in the future, an exp beyond st + 8h, a session past 8h, and a tampered cookie", async () => {
+    const { d, calls } = deps(() => [farHeader]);
+    const s = NOW / 1000;
+    for (const extra of [{ st: s + 120 }, { st: s - 60, exp: s - 60 + 8 * 3600 + 1 }, { st: s - 8 * 3600 - 1, exp: s + 10 }]) {
+      expect((await handleDeliverables(goodCookie({ cid: C, ...extra }), d)).status).toBe(401);
+    }
+    const good = goodCookie({ cid: C });
+    const tampered = good.slice(0, -2) + (good.endsWith("AA") ? "BB" : "AA");
+    expect((await handleDeliverables(tampered, d)).status).toBe(401);
+    expect(calls).toEqual([]);
+  });
+  it("preview-url also renews", async () => {
+    const { d } = sessionDeps();
+    const r = await handlePreviewUrl(goodCookie({ cid: C }), V, d);
+    expect(r.headers.get("set-cookie")).toContain(`${COOKIE_NAME}=`);
+  });
+  it("identify keeps st and caps at st + 8h", async () => {
+    const st = NOW / 1000 - 7.9 * 3600;
+    const { d } = deps((t) => (t.includes("portal_session") ? [{ ...farHeader, contact_id: null }] : t.includes("portal_identify") ? [{ portal_identify: C }] : []));
+    const idReq = new Request(`${ORIGIN}/api/room/identify`, { method: "POST", headers: { origin: ORIGIN, "content-type": "application/json" }, body: JSON.stringify({ name: "Pat", email: "pat@x.co" }) });
+    const r = await handleIdentify(idReq, goodCookie({ st, exp: NOW / 1000 + 60 }), d);
+    expect(r.status).toBe(200);
+    expect(verifySession(valueOf(r), SESSION_SECRET, NOW)).toMatchObject({ st, exp: st + 8 * 3600 });
   });
 });
