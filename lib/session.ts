@@ -1,11 +1,13 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 
 export const COOKIE_NAME = "__Host-rooms";
-export const SESSION_MAX_SEC = 8 * 3600;
+export const SESSION_MAX_SEC = 8 * 3600;  // absolute cap, counted from when the link was opened (st)
+export const SESSION_IDLE_SEC = 2 * 3600; // sliding idle timeout, renewed on every authenticated API call
+const CLOCK_SKEW_SEC = 60;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
-export interface SessionPayload { aid: string; eid: string; cid?: string; exp: number }
+export interface SessionPayload { aid: string; eid: string; cid?: string; st: number; exp: number }
 
 const mac = (secret: string, body: string) => createHmac("sha256", secret).update(body).digest("base64url");
 
@@ -25,17 +27,20 @@ export function verifySession(value: string | undefined, secret: string, nowMs: 
   let p: unknown;
   try { p = JSON.parse(Buffer.from(parts[0], "base64url").toString("utf8")); } catch { return null; }
   if (!p || typeof p !== "object") return null;
-  const { aid, eid, cid, exp } = p as Record<string, unknown>;
+  const { aid, eid, cid, st, exp } = p as Record<string, unknown>;
   if (typeof aid !== "string" || !UUID.test(aid)) return null;
   if (typeof eid !== "string" || !UUID.test(eid)) return null;
   if (cid !== undefined && (typeof cid !== "string" || !UUID.test(cid))) return null;
+  // Phase 2 cookies have no st: they fail closed here and the visitor re-opens the link.
+  if (typeof st !== "number" || !Number.isInteger(st) || st * 1000 > nowMs + CLOCK_SKEW_SEC * 1000) return null;
   if (typeof exp !== "number" || !Number.isInteger(exp) || exp * 1000 <= nowMs) return null;
-  return cid === undefined ? { aid, eid, exp } : { aid, eid, cid, exp };
+  if (exp > st + SESSION_MAX_SEC) return null;
+  return cid === undefined ? { aid, eid, st, exp } : { aid, eid, cid, st, exp };
 }
 
-export function sessionExpiry(accessExpiresAt: string | Date, nowMs: number = Date.now()): number {
+export function sessionExpiry(accessExpiresAt: string | Date, startSec: number, nowMs: number = Date.now()): number {
   const link = Math.floor(new Date(accessExpiresAt).getTime() / 1000);
-  return Math.min(link, Math.floor(nowMs / 1000) + SESSION_MAX_SEC);
+  return Math.min(link, Math.floor(nowMs / 1000) + SESSION_IDLE_SEC, startSec + SESSION_MAX_SEC);
 }
 
 export function setCookieHeader(value: string, maxAgeSec: number): string {

@@ -1,8 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
-import { handleOpen, handleIdentify, handleDeliverables, handlePreviewUrl, requireSession, depsFromEnv, type Deps } from "./handlers";
+import { handleOpen, handleIdentify, handleDeliverables, handlePreviewUrl, handleDocumentUrl, requireSession, depsFromEnv, type Deps } from "./handlers";
 import { signSession, verifySession, COOKIE_NAME } from "./session";
 import { hashToken } from "./token";
-import { verifyGrant } from "./grant";
+import { verifyGrant, verifyDocGrant } from "./grant";
 import type { Q } from "./queries";
 
 const A = "0b6f1c0e-2d3a-4b5c-8d7e-9f0a1b2c3d4e";
@@ -30,7 +30,7 @@ function deps(script: (text: string, values: unknown[]) => unknown[] | undefined
   return { d, calls };
 }
 const cookie = (p: object) => signSession(p as never, SESSION_SECRET);
-const goodCookie = (extra: object = {}) => cookie({ aid: A, eid: E, exp: NOW / 1000 + 3000, ...extra });
+const goodCookie = (extra: object = {}) => cookie({ aid: A, eid: E, st: NOW / 1000 - 60, exp: NOW / 1000 + 3000, ...extra });
 
 describe("handleOpen", () => {
   it("sends malformed tokens to /link-expired without touching the database", async () => {
@@ -62,6 +62,7 @@ describe("handleOpen", () => {
     const value = sc.split(";")[0].slice(COOKIE_NAME.length + 1);
     const p = verifySession(value, SESSION_SECRET, NOW)!;
     expect(p).toMatchObject({ aid: A, eid: E });
+    expect(p.st).toBe(Math.floor(NOW / 1000));
     expect(p.exp).toBe(Math.floor(NOW / 1000) + 3600);
     expect(sc).not.toContain(TOKEN);
     expect(r.headers.get("cache-control")).toBe("private, no-store");
@@ -73,7 +74,7 @@ describe("requireSession", () => {
     const { d, calls } = deps(() => [header]);
     expect(await requireSession(undefined, d)).toBeNull();
     expect(await requireSession("garbage", d)).toBeNull();
-    expect(await requireSession(cookie({ aid: A, eid: E, exp: NOW / 1000 - 10 }), d)).toBeNull();
+    expect(await requireSession(cookie({ aid: A, eid: E, st: NOW / 1000 - 600, exp: NOW / 1000 - 10 }), d)).toBeNull();
     expect(calls).toEqual([]);
   });
   it("rejects a validly signed cookie when the database says the link is no longer valid (revoked)", async () => {
@@ -110,18 +111,28 @@ describe("handleIdentify", () => {
       expect(await r.json()).toEqual({ error: "Please check your name and email." });
     }
   });
-  it("identifies, then re-signs the cookie with the contact and the same expiry", async () => {
+  it("identifies, then re-signs the cookie with the contact and a renewed expiry", async () => {
     const { d } = deps((t) => (t.includes("portal_session") ? [header] : t.includes("portal_identify") ? [{ portal_identify: C }] : []));
     const r = await handleIdentify(req({ name: "Pat", email: "pat@x.co" }), goodCookie(), d);
     expect(r.status).toBe(200);
     expect(await r.json()).toEqual({ ok: true });
     const value = r.headers.get("set-cookie")!.split(";")[0].slice(COOKIE_NAME.length + 1);
-    expect(verifySession(value, SESSION_SECRET, NOW)).toMatchObject({ aid: A, eid: E, cid: C, exp: NOW / 1000 + 3000 });
+    expect(verifySession(value, SESSION_SECRET, NOW)).toMatchObject({ aid: A, eid: E, cid: C, st: NOW / 1000 - 60, exp: NOW / 1000 + 3600 });
   });
   it("returns the same generic 400 when the database rejects the introduction", async () => {
     const { d } = deps((t) => (t.includes("portal_session") ? [header] : [{ portal_identify: null }]));
     const r = await handleIdentify(req({ name: "Pat", email: "pat@x.co" }), goodCookie(), d);
     expect(r.status).toBe(400);
+    expect(r.headers.get("set-cookie")).toContain(`${COOKIE_NAME}=`);
+  });
+  it("renews the session on every 400 but sets no cookie on the 401", async () => {
+    const { d } = deps((t) => (t.includes("portal_session") ? [header] : []));
+    const r = await handleIdentify(req({ name: 5, email: "a@b.co" }), goodCookie(), d);
+    expect(r.status).toBe(400);
+    expect(r.headers.get("set-cookie")).toContain(`${COOKIE_NAME}=`);
+    const u = await handleIdentify(req({ name: "P", email: "p@x.co" }), undefined, d);
+    expect(u.status).toBe(401);
+    expect(u.headers.get("set-cookie")).toBeNull();
   });
 });
 
@@ -145,6 +156,53 @@ describe("handleDeliverables", () => {
     expect(JSON.stringify(body)).not.toContain("SECRET");
     expect(JSON.stringify(body)).not.toContain("storage_prefix");
     expect(r.headers.get("cache-control")).toBe("private, no-store");
+  });
+  it("returns kind, welcome message, created_at and safe document info, and nothing internal", async () => {
+    const rows = [
+      { deliverable_id: "d2", deliverable_title: "Proposal", description: null, kind: "document", welcome_message: "Hi\n<b>there</b>",
+        version_id: "v9", version_no: 1, status: "shared", shared_at: "2026-10-14T10:00:00Z", created_at: "2026-10-14T09:00:00Z",
+        change_summary: null, screens: [], document: { filename: "Proposal.pdf", ext: "pdf", size: 1234, extra: "x" }, storage_prefix: "SECRET" },
+      { deliverable_id: "d1", deliverable_title: "App", description: null, kind: "prototype", welcome_message: null,
+        version_id: "v1", version_no: 1, status: "shared", shared_at: null, created_at: "2026-10-13T09:00:00Z",
+        change_summary: null, screens: [], document: null },
+    ];
+    const { d } = deps((t) => (t.includes("portal_session") ? [{ ...header, contact_id: C }] : rows));
+    const body = await (await handleDeliverables(goodCookie({ cid: C }), d)).json();
+    expect(body.deliverables[0]).toMatchObject({ id: "d2", kind: "document", welcome_message: "Hi\n<b>there</b>" });
+    expect(body.deliverables[0].versions[0]).toMatchObject({ created_at: "2026-10-14T09:00:00Z", document: { filename: "Proposal.pdf", ext: "pdf", size: 1234 } });
+    expect(body.deliverables[0].versions[0].document).not.toHaveProperty("extra");
+    expect(body.deliverables[1]).toMatchObject({ kind: "prototype", welcome_message: null });
+    expect(body.deliverables[1].versions[0].document).toBeNull();
+    expect(JSON.stringify(body)).not.toContain("SECRET");
+  });
+  it("defaults kind to prototype for rows from an older database function", async () => {
+    const rows = [{ deliverable_id: "d1", deliverable_title: "App", description: null, version_id: "v1", version_no: 1, status: "shared", shared_at: null, change_summary: null, screens: [] }];
+    const { d } = deps((t) => (t.includes("portal_session") ? [{ ...header, contact_id: C }] : rows));
+    const body = await (await handleDeliverables(goodCookie({ cid: C }), d)).json();
+    expect(body.deliverables[0]).toMatchObject({ kind: "prototype", welcome_message: null });
+    expect(body.deliverables[0].versions[0]).toMatchObject({ created_at: null, document: null });
+  });
+  it("survives hostile rows: bad created_at, Date objects, null screens on documents, odd welcome text", async () => {
+    const long = "x".repeat(1000);
+    const rows = [
+      { deliverable_id: "d1", deliverable_title: "A", description: null, kind: "document", welcome_message: `<script>alert(1)</script>\r\n${long}`,
+        version_id: "v1", version_no: 1, status: "shared", shared_at: null, created_at: "garbage", change_summary: null, screens: null, document: { filename: 5, ext: "pdf", size: 1 } },
+      { deliverable_id: "d1", deliverable_title: "A", description: null, kind: "weird", welcome_message: 42,
+        version_id: "v2", version_no: 2, status: "shared", shared_at: null, created_at: new Date("2026-10-14T09:00:00Z"), change_summary: null, screens: null, document: "str" },
+      { deliverable_id: "d1", deliverable_title: "A", description: null, version_id: "v3", version_no: 3, status: "shared", shared_at: null,
+        created_at: new Date("nope"), change_summary: null, screens: [], document: null },
+    ];
+    const { d } = deps((t) => (t.includes("portal_session") ? [{ ...header, contact_id: C }] : rows));
+    const r = await handleDeliverables(goodCookie({ cid: C }), d);
+    expect(r.status).toBe(200);
+    const body = await r.json();
+    const dl = body.deliverables[0];
+    expect(dl.kind).toBe("document");
+    expect(dl.welcome_message).toContain("<script>");
+    const [v1, v2, v3] = dl.versions;
+    expect(v1).toMatchObject({ created_at: null, screens: [], document: null });
+    expect(v2).toMatchObject({ created_at: "2026-10-14T09:00:00.000Z", screens: [], document: null });
+    expect(v3.created_at).toBeNull();
   });
 });
 
@@ -205,8 +263,14 @@ describe("fail closed when the database throws", () => {
   it("handleIdentify fails when identify itself throws after a valid session", async () => {
     const { d } = deps((t) => { if (t.includes("portal_session")) return [header]; throw new Error("x"); });
     const r = await handleIdentify(idReq, goodCookie(), d);
-    expect(r.status).not.toBe(200);
-    expect(r.headers.get("set-cookie")).toBeNull();
+    expect(r.status).toBe(400);
+    expect(r.headers.get("set-cookie")).toContain(`${COOKIE_NAME}=`); // authenticated session still renewed
+  });
+  it("handleDeliverables 500 path still renews the session", async () => {
+    const { d } = deps((t) => { if (t.includes("portal_session")) return [{ ...header, contact_id: C }]; throw new Error("x"); });
+    const r = await handleDeliverables(goodCookie({ cid: C }), d);
+    expect(r.status).toBe(500);
+    expect(r.headers.get("set-cookie")).toContain(`${COOKIE_NAME}=`);
   });
   it("handleDeliverables is non-200", async () => {
     expect((await handleDeliverables(goodCookie({ cid: C }), mk())).status).not.toBe(200);
@@ -244,5 +308,146 @@ describe("entry path fallbacks", () => {
       const { url } = await (await handlePreviewUrl(goodCookie({ cid: C }), V, d)).json();
       expect(url.endsWith("/index.html")).toBe(true);
     }
+  });
+});
+
+describe("sliding session", () => {
+  const farHeader = { ...header, contact_id: C, expires_at: new Date(NOW + 30 * 86_400_000).toISOString() };
+  const valueOf = (r: Response) => r.headers.get("set-cookie")!.split(";")[0].slice(COOKIE_NAME.length + 1);
+  const sessionDeps = (h: object = farHeader) => deps((t) => (t.includes("portal_session") ? [h] : []));
+
+  it("renews the cookie to now + 2 hours on an authenticated API call, keeping the start", async () => {
+    const { d } = sessionDeps();
+    const r = await handleDeliverables(goodCookie({ cid: C, exp: NOW / 1000 + 60 }), d);
+    expect(r.status).toBe(200);
+    const p = verifySession(valueOf(r), SESSION_SECRET, NOW)!;
+    expect(p).toMatchObject({ aid: A, eid: E, cid: C, st: NOW / 1000 - 60, exp: NOW / 1000 + 7200 });
+    expect(r.headers.get("set-cookie")).toContain("Max-Age=7200");
+  });
+  it("never renews past 8 hours from the start", async () => {
+    const st = NOW / 1000 - 7.5 * 3600;
+    const { d } = sessionDeps();
+    const r = await handleDeliverables(goodCookie({ cid: C, st, exp: NOW / 1000 + 60 }), d);
+    expect(verifySession(valueOf(r), SESSION_SECRET, NOW)!.exp).toBe(st + 8 * 3600);
+  });
+  it("never renews past the link expiry when it is sooner than the idle window", async () => {
+    const { d } = sessionDeps({ ...farHeader, expires_at: new Date(NOW + 600_000).toISOString() });
+    const r = await handleDeliverables(goodCookie({ cid: C }), d);
+    expect(verifySession(valueOf(r), SESSION_SECRET, NOW)!.exp).toBe(NOW / 1000 + 600);
+    expect(r.headers.get("set-cookie")).toContain("Max-Age=600");
+  });
+  it("refuses when the link expired in the database, and when it expires exactly now", async () => {
+    for (const ms of [-1000, 0]) {
+      const { d } = sessionDeps({ ...farHeader, expires_at: new Date(NOW + ms).toISOString() });
+      const r = await handleDeliverables(goodCookie({ cid: C }), d);
+      expect(r.status).toBe(401);
+      expect(r.headers.get("set-cookie")).toBeNull();
+    }
+  });
+  it("an idle-expired cookie is refused without a database call (exactly at expiry too)", async () => {
+    for (const off of [-1, 0]) {
+      const { d, calls } = deps(() => [farHeader]);
+      expect((await handleDeliverables(goodCookie({ cid: C, exp: NOW / 1000 + off }), d)).status).toBe(401);
+      expect(calls).toEqual([]);
+    }
+  });
+  it("a Phase 2 cookie (no st) is refused without a database call", async () => {
+    const { d, calls } = deps(() => [farHeader]);
+    expect((await handleDeliverables(cookie({ aid: A, eid: E, cid: C, exp: NOW / 1000 + 600 }), d)).status).toBe(401);
+    expect(calls).toEqual([]);
+  });
+  it("refuses an st in the future, an exp beyond st + 8h, a session past 8h, and a tampered cookie", async () => {
+    const { d, calls } = deps(() => [farHeader]);
+    const s = NOW / 1000;
+    for (const extra of [{ st: s + 120 }, { st: s - 60, exp: s - 60 + 8 * 3600 + 1 }, { st: s - 8 * 3600 - 1, exp: s + 10 }]) {
+      expect((await handleDeliverables(goodCookie({ cid: C, ...extra }), d)).status).toBe(401);
+    }
+    const good = goodCookie({ cid: C });
+    const tampered = good.slice(0, -2) + (good.endsWith("AA") ? "BB" : "AA");
+    expect((await handleDeliverables(tampered, d)).status).toBe(401);
+    expect(calls).toEqual([]);
+  });
+  it("preview-url also renews", async () => {
+    const { d } = sessionDeps();
+    const r = await handlePreviewUrl(goodCookie({ cid: C }), V, d);
+    expect(r.headers.get("set-cookie")).toContain(`${COOKIE_NAME}=`);
+  });
+  it("identify keeps st and caps at st + 8h", async () => {
+    const st = NOW / 1000 - 7.9 * 3600;
+    const { d } = deps((t) => (t.includes("portal_session") ? [{ ...farHeader, contact_id: null }] : t.includes("portal_identify") ? [{ portal_identify: C }] : []));
+    const idReq = new Request(`${ORIGIN}/api/room/identify`, { method: "POST", headers: { origin: ORIGIN, "content-type": "application/json" }, body: JSON.stringify({ name: "Pat", email: "pat@x.co" }) });
+    const r = await handleIdentify(idReq, goodCookie({ st, exp: NOW / 1000 + 60 }), d);
+    expect(r.status).toBe(200);
+    expect(verifySession(valueOf(r), SESSION_SECRET, NOW)).toMatchObject({ st, exp: st + 8 * 3600 });
+  });
+});
+
+describe("handleDocumentUrl", () => {
+  const U = "4fad5042-6b7e-4f90-8ab2-3d4e5f607182";
+  const prefix = `${E}/${A}/${U}`;
+  const withContact = (t: string) => (t.includes("portal_session") ? [{ ...header, contact_id: C }] : undefined);
+  const req = (h: Record<string, string> = { origin: ORIGIN, "content-type": "application/json" }) =>
+    new Request(`${ORIGIN}/api/room/versions/${V}/document-url`, { method: "POST", headers: h, body: "{}" });
+  const urlFor = async (row: object) => {
+    const { d } = deps((t) => withContact(t) ?? [row]);
+    const r = await handleDocumentUrl(req(), goodCookie({ cid: C }), V, d);
+    expect(r.status).toBe(200);
+    const { url } = await r.json();
+    return verifyDocGrant(url.match(/\/d\/([^/]+)$/)![1], GRANT_SECRET, NOW);
+  };
+
+  it("rejects cross-origin requests and bad ids before any database call", async () => {
+    const { d, calls } = deps(() => []);
+    expect((await handleDocumentUrl(req({ origin: "https://evil.example", "content-type": "application/json" }), goodCookie({ cid: C }), V, d)).status).toBe(403);
+    expect((await handleDocumentUrl(req(), goodCookie({ cid: C }), "not-a-uuid", d)).status).toBe(404);
+    expect(calls).toEqual([]);
+  });
+  it("requires a session with a contact", async () => {
+    const { d } = deps(() => [header]);
+    expect((await handleDocumentUrl(req(), goodCookie(), V, d)).status).toBe(401);
+  });
+  it("404s for a prototype, a draft or another engagement's version, still renewing the session", async () => {
+    const { d } = deps((t) => withContact(t) ?? []);
+    const r = await handleDocumentUrl(req(), goodCookie({ cid: C }), V, d);
+    expect(r.status).toBe(404);
+    expect(await r.json()).toEqual({ error: "Not available." });
+    expect(r.headers.get("set-cookie")).toContain(`${COOKIE_NAME}=`);
+  });
+  it("returns a preview-host /d/ URL with a short-lived document grant for exactly that file", async () => {
+    const { d, calls } = deps((t) => withContact(t) ?? [{ storage_prefix: prefix, file: "document.pdf", filename: "Proposal.pdf" }]);
+    const r = await handleDocumentUrl(req(), goodCookie({ cid: C }), V, d);
+    expect(r.status).toBe(200);
+    const { url } = await r.json();
+    const m = url.match(/^https:\/\/preview\.rosably\.com\/d\/([^/]+)$/)!;
+    expect(verifyDocGrant(m[1], GRANT_SECRET, NOW)).toEqual({ ok: true, path: `${prefix}/document.pdf`, filename: "Proposal.pdf", exp: NOW / 1000 + 120 });
+    expect(calls.at(-1)!.values).toEqual([A, E, C, V]);
+    expect(r.headers.get("set-cookie")).toContain(`${COOKIE_NAME}=`);
+    expect(JSON.stringify(await (await handleDocumentUrl(req(), goodCookie({ cid: C }), V, d)).json())).not.toContain(prefix);
+  });
+  it("forces the download name's extension to the stored file's extension", async () => {
+    const base = { storage_prefix: prefix, file: "document.pdf" };
+    expect(await urlFor({ ...base, filename: "Proposal.exe" })).toMatchObject({ ok: true, filename: "document.pdf" });
+    expect(await urlFor({ ...base, filename: "Proposal" })).toMatchObject({ ok: true, filename: "document.pdf" });
+    expect(await urlFor({ ...base, filename: "Proposal.docx" })).toMatchObject({ ok: true, filename: "document.pdf" });
+    expect(await urlFor({ ...base, filename: "Proposal.pdf.html" })).toMatchObject({ ok: true, filename: "document.pdf" });
+    expect(await urlFor({ ...base, filename: null })).toMatchObject({ ok: true, filename: "document.pdf" });
+    expect(await urlFor({ ...base, filename: "Quarterly.PDF" })).toMatchObject({ ok: true, filename: "Quarterly.PDF" });
+    expect(await urlFor({ ...base, filename: 'a"b.pdf' })).toMatchObject({ ok: true, filename: "document.pdf" });
+    expect(await urlFor({ ...base, filename: "x".repeat(147) + ".pdf" })).toMatchObject({ ok: true, filename: "document.pdf" });
+    expect(await urlFor({ ...base, filename: "x".repeat(146) + ".pdf" })).toMatchObject({ ok: true, filename: "x".repeat(146) + ".pdf" });
+  });
+  it("keeps a .jpeg display name for a stored document.jpg (same normalised type)", async () => {
+    const base = { storage_prefix: prefix, file: "document.jpg" };
+    expect(await urlFor({ ...base, filename: "photo.jpeg" })).toMatchObject({ ok: true, filename: "photo.jpeg" });
+    expect(await urlFor({ ...base, filename: "photo.png" })).toMatchObject({ ok: true, filename: "document.jpg" });
+  });
+  it("404s when the stored filename or path is unsafe, and when the database throws", async () => {
+    const bad = deps((t) => withContact(t) ?? [{ storage_prefix: prefix, file: "../x.pdf", filename: "a.pdf" }]);
+    expect((await handleDocumentUrl(req(), goodCookie({ cid: C }), V, bad.d)).status).toBe(404);
+    const boom = deps((t) => { if (t.includes("portal_session")) return [{ ...header, contact_id: C }]; throw new Error("db"); });
+    const r = await handleDocumentUrl(req(), goodCookie({ cid: C }), V, boom.d);
+    expect(r.status).toBe(404);
+    expect(await r.json()).toEqual({ error: "Not available." });
+    expect(r.headers.get("set-cookie")).toContain(`${COOKIE_NAME}=`);
   });
 });

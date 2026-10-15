@@ -2,6 +2,9 @@ import type { NextConfig } from "next";
 
 const previewOrigin = new URL(process.env.NEXT_PUBLIC_PREVIEW_URL || "https://preview.rosably.com").origin;
 const csp = `frame-ancestors 'none'; frame-src ${previewOrigin}; base-uri 'none'; object-src 'none'; form-action 'self'`;
+// Document downloads need no CSP change: the page only navigates (window.location.assign) to the preview host's
+// /d/<grant> URL, which answers with Content-Disposition: attachment. Documents are never framed or fetched here,
+// so frame-src stays limited to the preview origin for prototypes and there is no connect-src/default-src to widen.
 const noStore = [{ key: "Cache-Control", value: "private, no-store" }];
 
 const nextConfig: NextConfig = {
