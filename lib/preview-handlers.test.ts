@@ -40,6 +40,14 @@ describe("handlePreviewOpen", () => {
     expect(r.headers.get("referrer-policy")).toBe("no-referrer");
     expect(calls[0].values).toContain(E);
   });
+  it("issues a cookie that requirePreview accepts for its hour and rejects after", async () => {
+    const { d } = deps(okDb);
+    const c = (await handlePreviewOpen(token(), d)).headers.get("set-cookie")!;
+    const value = c.slice(`${PREVIEW_COOKIE}=`.length).split(";")[0];
+    expect(await requirePreview(value, d)).not.toBeNull();
+    expect(await requirePreview(value, { ...d, now: () => NOW + 3599_000 })).not.toBeNull();
+    expect(await requirePreview(value, { ...d, now: () => NOW + 3601_000 })).toBeNull();
+  });
   it("sends bad, expired, wrong-kind and unknown-engagement tokens to /link-expired with no cookie", async () => {
     const { d } = deps(okDb);
     const proto = signGrant(`${E}/${D}/v1`, GRANT_SECRET, NOW);

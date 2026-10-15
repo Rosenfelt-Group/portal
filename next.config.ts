@@ -24,6 +24,8 @@ const nextConfig: NextConfig = {
       { source: "/room", headers: noStore },
       { source: "/r/:path*", headers: noStore },
       { source: "/link-expired", headers: noStore },
+      { source: "/preview", headers: noStore },
+      { source: "/preview/:path*", headers: noStore },
     ];
   },
 };
