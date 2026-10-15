@@ -37,7 +37,7 @@ describe("room view helpers", () => {
   });
 });
 
-import { PreviewFrame, sortVersions, versionLabel, WelcomeNote, type Version } from "@/components/RoomView";
+import { PreviewFrame, sortVersions, versionLabel, WelcomeNote, DocumentCard, DeliverableList, type Version } from "@/components/RoomView";
 import nextConfig from "@/next.config";
 
 describe("preview frame", () => {
@@ -76,6 +76,57 @@ describe("version label and welcome note", () => {
     expect(html).not.toContain("<b>");
     expect(html).not.toContain("<script>");
     expect(html).toContain("white-space:pre-line");
+  });
+});
+
+describe("welcome note hardening", () => {
+  it("wraps long unbroken strings inside the card", () => {
+    expect(renderToStaticMarkup(<WelcomeNote text={"x".repeat(1000)} />)).toContain("overflow-wrap:anywhere");
+  });
+  it("renders nothing for a whitespace-only message", () => {
+    for (const t of ["", "   ", "\n\t \n"]) expect(renderToStaticMarkup(<WelcomeNote text={t} />)).toBe("");
+  });
+});
+
+const docV = (over: object = {}) => ({ id: "v", version_no: 1, status: "shared", shared_at: null, created_at: "2026-10-14T12:00:00Z", change_summary: null, screens: [],
+  document: { filename: "Proposal.pdf", ext: "pdf", size: 1572864 }, ...over });
+const docD = (over: object = {}) => ({ id: "d", title: "Proposal", description: null, kind: "document" as const, welcome_message: null, versions: [docV()], ...over });
+
+describe("document card", () => {
+  it("shows the file name, type and size with a download button and no frame", () => {
+    const html = renderToStaticMarkup(<DocumentCard d={docD()} onSessionEnded={() => {}} />);
+    expect(html).toContain("Proposal.pdf");
+    expect(html).toContain("PDF");
+    expect(html).toContain("1.5 MB");
+    expect(html).toMatch(/<button[^>]*>Download<\/button>/);
+    expect(html).not.toContain("<iframe");
+    expect(html).not.toContain("<embed");
+    expect(html).not.toContain("<object");
+  });
+  it("omits an empty welcome note and never prints a stray size for an invalid one", () => {
+    const html = renderToStaticMarkup(<DocumentCard d={docD({ welcome_message: "  ", versions: [docV({ document: { filename: "a.pdf", ext: "pdf", size: NaN } })] })} onSessionEnded={() => {}} />);
+    expect(html).not.toContain("NaN");
+    expect(html).not.toContain("<p style=\"white-space:pre-line");
+  });
+});
+
+describe("deliverable list", () => {
+  it("renders a room whose only deliverables are documents, without the empty message", () => {
+    const html = renderToStaticMarkup(<DeliverableList items={[docD()]} onSessionEnded={() => {}} />);
+    expect(html).toContain("Proposal.pdf");
+    expect(html).toMatch(/<button[^>]*>Download<\/button>/);
+    expect(html).not.toContain("Nothing has been shared yet");
+  });
+  it("renders a mix of prototypes and documents", () => {
+    const proto = { ...docD({ id: "p", title: "Prototype One", kind: "prototype" as const }), versions: [docV({ id: "pv", document: null })] };
+    const html = renderToStaticMarkup(<DeliverableList items={[proto, docD()]} onSessionEnded={() => {}} />);
+    expect(html).toContain("Prototype One");
+    expect(html).toContain("Proposal.pdf");
+    expect(html).not.toContain("Nothing has been shared yet");
+  });
+  it("shows the empty message only when nothing at all is visible", () => {
+    expect(renderToStaticMarkup(<DeliverableList items={[]} onSessionEnded={() => {}} />)).toContain("Nothing has been shared yet");
+    expect(renderToStaticMarkup(<DeliverableList items={[docD({ versions: [] })]} onSessionEnded={() => {}} />)).toContain("Nothing has been shared yet");
   });
 });
 

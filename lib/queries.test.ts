@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { openRoom, getSessionRow, identify, listDeliverables, versionForPreview, type Q } from "./queries";
+import { openRoom, getSessionRow, identify, listDeliverables, versionForPreview, documentForDownload, type Q } from "./queries";
 
 const A = "0b6f1c0e-2d3a-4b5c-8d7e-9f0a1b2c3d4e";
 const E = "1c7a2d1f-3e4b-4c6d-9e8f-0a1b2c3d4e5f";
@@ -49,5 +49,12 @@ describe("queries call only the portal functions with typed params", () => {
     await identify(q, A, E, "x'); drop table rooms.engagements; --", "a@b.co");
     expect(calls[0].text).not.toContain("drop table");
     expect(calls[0].values).toContain("x'); drop table rooms.engagements; --");
+  });
+  it("documentForDownload binds all four ids and returns the row or null", async () => {
+    const p = fake([[{ storage_prefix: "a/b/c", file: "document.pdf", filename: "P.pdf" }]]);
+    expect(await documentForDownload(p.q, A, E, undefined, V)).toEqual({ storage_prefix: "a/b/c", file: "document.pdf", filename: "P.pdf" });
+    expect(p.calls[0].text).toContain("rooms.portal_document_for_download(");
+    expect(p.calls[0].values).toEqual([A, E, null, V]);
+    expect(await documentForDownload(fake([[]]).q, A, E, C, V)).toBeNull();
   });
 });

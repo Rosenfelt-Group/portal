@@ -37,3 +37,10 @@ export async function versionForPreview(q: Q, aid: string, eid: string, cid: str
   const rows = await q<PreviewRow>`select * from rooms.portal_version_for_preview(${aid}::uuid, ${eid}::uuid, ${cid ?? null}::uuid, ${versionId}::uuid)`;
   return rows[0] ?? null;
 }
+
+export interface DocumentRow { storage_prefix: string; file: string; filename: string }
+
+export async function documentForDownload(q: Q, aid: string, eid: string, cid: string | undefined, versionId: string): Promise<DocumentRow | null> {
+  const rows = await q<DocumentRow>`select * from rooms.portal_document_for_download(${aid}::uuid, ${eid}::uuid, ${cid ?? null}::uuid, ${versionId}::uuid)`;
+  return rows[0] ?? null;
+}

@@ -1,9 +1,9 @@
 import { getQ } from "./db";
-import { openRoom, getSessionRow, identify, listDeliverables, versionForPreview, type Q, type RoomHeader, type DeliverableRow } from "./queries";
+import { openRoom, getSessionRow, identify, listDeliverables, versionForPreview, documentForDownload, type Q, type RoomHeader, type DeliverableRow, type DocumentRow } from "./queries";
 import { isTokenShape, hashToken } from "./token";
 import { signSession, verifySession, sessionExpiry, setCookieHeader, type SessionPayload } from "./session";
 import { isSameOriginJson } from "./guards";
-import { signGrant, GRANT_TTL_SEC } from "./grant";
+import { signGrant, signDocGrant, GRANT_TTL_SEC } from "./grant";
 
 export interface Deps {
   q: Q; sessionSecret: string; grantSecret: string; previewUrl: string; portalOrigin: string; now?: () => number;
@@ -141,4 +141,28 @@ export async function handlePreviewUrl(cookie: string | undefined, versionId: st
   let grant: string;
   try { grant = signGrant(row.storage_prefix, d.grantSecret, nowMs(d)); } catch { return json({ error: "Not available." }, 404, { "Set-Cookie": sess.renewed }); }
   return json({ url: `${d.previewUrl}/v/${grant}/${entryPath(row.entry)}`, expiresInSec: GRANT_TTL_SEC }, 200, { "Set-Cookie": sess.renewed });
+}
+
+// The download name must end in the stored file's extension (document.<ext>); otherwise use the stored name.
+function downloadName(file: string, filename: unknown): string {
+  const ext = file.slice(file.lastIndexOf(".")).toLowerCase();
+  if (typeof filename === "string" && filename.length > ext.length && filename.slice(-ext.length).toLowerCase() === ext) return filename;
+  return file;
+}
+
+// POST: a 2-minute download URL on the preview host for a shared document. The portal never touches
+// Storage; the preview host verifies the document grant and streams the file as an attachment.
+// The URL is returned to the caller only and is never logged.
+export async function handleDocumentUrl(req: Request, cookie: string | undefined, versionId: string, d: Deps): Promise<Response> {
+  if (!isSameOriginJson(req, d.portalOrigin)) return json({ error: "Not allowed." }, 403);
+  if (!UUID.test(versionId)) return json({ error: "Not available." }, 404);
+  const sess = await requireSession(cookie, d);
+  if (!sess || !sess.row.contact_id) return json({ error: "Session expired." }, 401);
+  const renew = { "Set-Cookie": sess.renewed };
+  let row: DocumentRow | null;
+  try { row = await documentForDownload(d.q, sess.s.aid, sess.s.eid, sess.s.cid, versionId); } catch { return json({ error: "Not available." }, 404, renew); }
+  if (!row || typeof row.file !== "string" || typeof row.storage_prefix !== "string") return json({ error: "Not available." }, 404, renew);
+  let grant: string;
+  try { grant = signDocGrant(`${row.storage_prefix}/${row.file}`, downloadName(row.file, row.filename), d.grantSecret, nowMs(d)); } catch { return json({ error: "Not available." }, 404, renew); }
+  return json({ url: `${d.previewUrl}/d/${grant}` }, 200, renew);
 }

@@ -1,8 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
-import { handleOpen, handleIdentify, handleDeliverables, handlePreviewUrl, requireSession, depsFromEnv, type Deps } from "./handlers";
+import { handleOpen, handleIdentify, handleDeliverables, handlePreviewUrl, handleDocumentUrl, requireSession, depsFromEnv, type Deps } from "./handlers";
 import { signSession, verifySession, COOKIE_NAME } from "./session";
 import { hashToken } from "./token";
-import { verifyGrant } from "./grant";
+import { verifyGrant, verifyDocGrant } from "./grant";
 import type { Q } from "./queries";
 
 const A = "0b6f1c0e-2d3a-4b5c-8d7e-9f0a1b2c3d4e";
@@ -363,5 +363,66 @@ describe("sliding session", () => {
     const r = await handleIdentify(idReq, goodCookie({ st, exp: NOW / 1000 + 60 }), d);
     expect(r.status).toBe(200);
     expect(verifySession(valueOf(r), SESSION_SECRET, NOW)).toMatchObject({ st, exp: st + 8 * 3600 });
+  });
+});
+
+describe("handleDocumentUrl", () => {
+  const U = "4fad5042-6b7e-4f90-8ab2-3d4e5f607182";
+  const prefix = `${E}/${A}/${U}`;
+  const withContact = (t: string) => (t.includes("portal_session") ? [{ ...header, contact_id: C }] : undefined);
+  const req = (h: Record<string, string> = { origin: ORIGIN, "content-type": "application/json" }) =>
+    new Request(`${ORIGIN}/api/room/versions/${V}/document-url`, { method: "POST", headers: h, body: "{}" });
+  const urlFor = async (row: object) => {
+    const { d } = deps((t) => withContact(t) ?? [row]);
+    const r = await handleDocumentUrl(req(), goodCookie({ cid: C }), V, d);
+    expect(r.status).toBe(200);
+    const { url } = await r.json();
+    return verifyDocGrant(url.match(/\/d\/([^/]+)$/)![1], GRANT_SECRET, NOW);
+  };
+
+  it("rejects cross-origin requests and bad ids before any database call", async () => {
+    const { d, calls } = deps(() => []);
+    expect((await handleDocumentUrl(req({ origin: "https://evil.example", "content-type": "application/json" }), goodCookie({ cid: C }), V, d)).status).toBe(403);
+    expect((await handleDocumentUrl(req(), goodCookie({ cid: C }), "not-a-uuid", d)).status).toBe(404);
+    expect(calls).toEqual([]);
+  });
+  it("requires a session with a contact", async () => {
+    const { d } = deps(() => [header]);
+    expect((await handleDocumentUrl(req(), goodCookie(), V, d)).status).toBe(401);
+  });
+  it("404s for a prototype, a draft or another engagement's version, still renewing the session", async () => {
+    const { d } = deps((t) => withContact(t) ?? []);
+    const r = await handleDocumentUrl(req(), goodCookie({ cid: C }), V, d);
+    expect(r.status).toBe(404);
+    expect(await r.json()).toEqual({ error: "Not available." });
+    expect(r.headers.get("set-cookie")).toContain(`${COOKIE_NAME}=`);
+  });
+  it("returns a preview-host /d/ URL with a short-lived document grant for exactly that file", async () => {
+    const { d, calls } = deps((t) => withContact(t) ?? [{ storage_prefix: prefix, file: "document.pdf", filename: "Proposal.pdf" }]);
+    const r = await handleDocumentUrl(req(), goodCookie({ cid: C }), V, d);
+    expect(r.status).toBe(200);
+    const { url } = await r.json();
+    const m = url.match(/^https:\/\/preview\.rosably\.com\/d\/([^/]+)$/)!;
+    expect(verifyDocGrant(m[1], GRANT_SECRET, NOW)).toEqual({ ok: true, path: `${prefix}/document.pdf`, filename: "Proposal.pdf", exp: NOW / 1000 + 120 });
+    expect(calls.at(-1)!.values).toEqual([A, E, C, V]);
+    expect(r.headers.get("set-cookie")).toContain(`${COOKIE_NAME}=`);
+    expect(JSON.stringify(await (await handleDocumentUrl(req(), goodCookie({ cid: C }), V, d)).json())).not.toContain(prefix);
+  });
+  it("forces the download name's extension to the stored file's extension", async () => {
+    const base = { storage_prefix: prefix, file: "document.pdf" };
+    expect(await urlFor({ ...base, filename: "Proposal.exe" })).toMatchObject({ ok: true, filename: "document.pdf" });
+    expect(await urlFor({ ...base, filename: "Proposal" })).toMatchObject({ ok: true, filename: "document.pdf" });
+    expect(await urlFor({ ...base, filename: "Proposal.docx" })).toMatchObject({ ok: true, filename: "document.pdf" });
+    expect(await urlFor({ ...base, filename: "Proposal.pdf.html" })).toMatchObject({ ok: true, filename: "document.pdf" });
+    expect(await urlFor({ ...base, filename: null })).toMatchObject({ ok: true, filename: "document.pdf" });
+    expect(await urlFor({ ...base, filename: "Quarterly.PDF" })).toMatchObject({ ok: true, filename: "Quarterly.PDF" });
+  });
+  it("404s when the stored filename or path is unsafe, and when the database throws", async () => {
+    const bad = deps((t) => withContact(t) ?? [{ storage_prefix: prefix, file: "../x.pdf", filename: "a.pdf" }]);
+    expect((await handleDocumentUrl(req(), goodCookie({ cid: C }), V, bad.d)).status).toBe(404);
+    const boom = deps((t) => { if (t.includes("portal_session")) return [{ ...header, contact_id: C }]; throw new Error("db"); });
+    const r = await handleDocumentUrl(req(), goodCookie({ cid: C }), V, boom.d);
+    expect(r.status).toBe(404);
+    expect(await r.json()).toEqual({ error: "Not available." });
   });
 });

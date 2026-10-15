@@ -23,4 +23,15 @@ describe("formatBytes", () => {
     expect(formatBytes(2048)).toBe("2 KB");
     expect(formatBytes(1572864)).toBe("1.5 MB");
   });
+  it("rolls into the next unit instead of printing 1024 KB", () => {
+    expect(formatBytes(1048575)).toBe("1.0 MB");
+    expect(formatBytes(1048064)).toBe("1.0 MB");
+    expect(formatBytes(1047552)).toBe("1023 KB");
+    expect(formatBytes(1023)).toBe("1023 B");
+    expect(formatBytes(1023.6)).toBe("1 KB");
+    expect(formatBytes(0)).toBe("0 B");
+  });
+  it("returns an empty string for NaN, Infinity, negatives and non-numbers", () => {
+    for (const bad of [NaN, Infinity, -Infinity, -1, "12", null, undefined]) expect(formatBytes(bad as never)).toBe("");
+  });
 });

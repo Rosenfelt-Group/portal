@@ -1,7 +1,7 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { main, button, card } from "./room-styles";
-import { formatVersionDate } from "@/lib/format";
+import { formatVersionDate, formatBytes } from "@/lib/format";
 
 export interface Version {
   id: string; version_no: number; status: string; shared_at: string | null; created_at: string | null;
@@ -16,8 +16,10 @@ export function versionLabel(v: Version, timeZone?: string): string {
 }
 
 // Plain text only: React escapes it; pre-line keeps the line breaks Brian typed.
+// Whitespace-only text counts as absent; overflowWrap keeps a long unbroken string inside the card.
 export function WelcomeNote({ text }: { text: string }) {
-  return <p style={{ whiteSpace: "pre-line", margin: "0.25rem 0 0.75rem" }}>{text}</p>;
+  if (typeof text !== "string" || text.trim() === "") return null;
+  return <p style={{ whiteSpace: "pre-line", overflowWrap: "anywhere", margin: "0.25rem 0 0.75rem" }}>{text}</p>;
 }
 
 export function welcomeText(relationship: string): string {
@@ -89,7 +91,7 @@ function SolutionCard({ d, onSessionEnded }: { d: Deliverable; onSessionEnded: (
     <section style={card}>
       <h2 style={{ marginTop: 0 }}>{d.title}</h2>
       {d.description && <p>{d.description}</p>}
-      {d.welcome_message && <WelcomeNote text={d.welcome_message} />}
+      {d.welcome_message?.trim() && <WelcomeNote text={d.welcome_message} />}
       <label htmlFor={`ver-${d.id}`} style={{ fontWeight: 600 }}>Version </label>
       <select id={`ver-${d.id}`} value={versionId} onChange={e => setVersionId(e.target.value)}>
         {versions.map(v => (
@@ -104,6 +106,69 @@ function SolutionCard({ d, onSessionEnded }: { d: Deliverable; onSessionEnded: (
         onClick={() => setNonce(n => n + 1)}>Reload preview</button>
     </section>
   );
+}
+
+// Documents are only ever downloaded (attachment from the preview host), never shown in this page.
+// The signed URL is fetched on click (it lives 2 minutes), used once for navigation and never logged or stored.
+export function DocumentCard({ d, onSessionEnded }: { d: Deliverable; onSessionEnded: () => void }) {
+  const versions = sortVersions(d.versions);
+  const [versionId, setVersionId] = useState(versions[0]?.id ?? "");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const inFlight = useRef(false);
+  const current = versions.find(v => v.id === versionId);
+  const size = current?.document ? formatBytes(current.document.size) : "";
+
+  const download = async () => {
+    if (!versionId || inFlight.current) return;
+    inFlight.current = true; setBusy(true); setErr(null);
+    try {
+      const res = await fetch(`/api/room/versions/${encodeURIComponent(versionId)}/document-url`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+      });
+      if (res.status === 401) { onSessionEnded(); return; }
+      if (!res.ok) throw new Error(String(res.status));
+      const data = await res.json();
+      if (typeof data.url !== "string" || !data.url.startsWith("https://")) throw new Error("bad url");
+      window.location.assign(data.url);
+    } catch {
+      setErr("This file isn't available right now.");
+    } finally {
+      inFlight.current = false; setBusy(false);
+    }
+  };
+
+  return (
+    <section style={card}>
+      <h2 style={{ marginTop: 0 }}>{d.title}</h2>
+      {d.description && <p>{d.description}</p>}
+      {d.welcome_message?.trim() && <WelcomeNote text={d.welcome_message} />}
+      <label htmlFor={`ver-${d.id}`} style={{ fontWeight: 600 }}>Version </label>
+      <select id={`ver-${d.id}`} value={versionId} onChange={e => setVersionId(e.target.value)}>
+        {versions.map(v => <option key={v.id} value={v.id}>{versionLabel(v)}</option>)}
+      </select>
+      {current?.change_summary && <p>{current.change_summary}</p>}
+      {current?.document && (
+        <p style={{ margin: "0.75rem 0 0", overflowWrap: "anywhere" }}>
+          {current.document.filename} · {current.document.ext.toUpperCase()}{size && ` · ${size}`}
+        </p>
+      )}
+      {err && <p role="alert" style={{ color: "#b42318" }}>{err}</p>}
+      <button type="button" disabled={busy} style={{ ...button, padding: "0.5rem 1.25rem", fontSize: "0.95rem" }} onClick={() => { void download(); }}>Download</button>
+      <p style={{ fontSize: "0.85rem", color: "#475467" }}>The file downloads to your device; it is never opened inside this page.</p>
+    </section>
+  );
+}
+
+// Everything visible in the room: prototypes and documents. The empty message shows only when nothing is.
+export function DeliverableList({ items, onSessionEnded }: { items: Deliverable[]; onSessionEnded: () => void }) {
+  const visible = items.filter(d => Array.isArray(d.versions) && d.versions.length > 0);
+  if (visible.length === 0) {
+    return <p>Nothing has been shared yet. We&apos;ll let you know when there&apos;s something to review.</p>;
+  }
+  return <>{visible.map(d => d.kind === "document"
+    ? <DocumentCard key={d.id} d={d} onSessionEnded={onSessionEnded} />
+    : <SolutionCard key={d.id} d={d} onSessionEnded={onSessionEnded} />)}</>;
 }
 
 export function RoomView({ title, orgName, relationship, contactName }: {
@@ -150,10 +215,7 @@ export function RoomView({ title, orgName, relationship, contactName }: {
           {error} <button type="button" style={{ ...button, marginTop: 0 }} onClick={() => { void load(); }}>Retry</button>
         </p>
       )}
-      {items && items.length === 0 && (
-        <p>Nothing has been shared yet. We&apos;ll let you know when there&apos;s something to review.</p>
-      )}
-      {items?.map(d => d.kind === "document" ? null : <SolutionCard key={d.id} d={d} onSessionEnded={onSessionEnded} />)}
+      {items && <DeliverableList items={items} onSessionEnded={onSessionEnded} />}
     </main>
   );
 }
