@@ -88,15 +88,40 @@ export async function handleDeliverables(cookie: string | undefined, d: Deps): P
   if (!sess || !sess.row.contact_id) return json({ error: "Session expired." }, 401);
   let rows: DeliverableRow[];
   try { rows = await listDeliverables(d.q, sess.s.aid, sess.s.eid); } catch { return json({ error: "Not available." }, 500, { "Set-Cookie": sess.renewed }); }
-  const byId = new Map<string, { id: string; title: string; description: string | null; versions: unknown[] }>();
+  const byId = new Map<string, { id: string; title: string; description: string | null; kind: string; welcome_message: string | null; versions: unknown[] }>();
   for (const r of rows) {
-    if (!byId.has(r.deliverable_id)) byId.set(r.deliverable_id, { id: r.deliverable_id, title: r.deliverable_title, description: r.description, versions: [] });
+    if (!byId.has(r.deliverable_id)) {
+      byId.set(r.deliverable_id, {
+        id: r.deliverable_id, title: r.deliverable_title, description: r.description,
+        kind: r.kind === "document" ? "document" : "prototype",
+        welcome_message: typeof r.welcome_message === "string" ? r.welcome_message : null,
+        versions: [],
+      });
+    }
     byId.get(r.deliverable_id)!.versions.push({
       id: r.version_id, version_no: r.version_no, status: r.status, shared_at: r.shared_at,
-      change_summary: r.change_summary, screens: r.screens ?? [],
+      created_at: isoOrNull(r.created_at),
+      change_summary: r.change_summary, screens: Array.isArray(r.screens) ? r.screens : [], document: docInfo(r.document),
     });
   }
   return json({ deliverables: [...byId.values()] }, 200, { "Set-Cookie": sess.renewed });
+}
+
+// Whitelists the document fields so nothing internal (storage path, manifest extras) reaches the browser.
+function docInfo(x: unknown): { filename: string; ext: string; size: number } | null {
+  if (!x || typeof x !== "object") return null;
+  const { filename, ext, size } = x as Record<string, unknown>;
+  if (typeof filename !== "string" || typeof ext !== "string" || typeof size !== "number") return null;
+  return { filename, ext, size };
+}
+
+// A valid string passes through; a Date becomes ISO; anything unparseable becomes null (never throws).
+function isoOrNull(v: unknown): string | null {
+  if (v === null || v === undefined || v === "") return null;
+  if (typeof v !== "string" && !(v instanceof Date)) return null;
+  const t = new Date(v).getTime();
+  if (Number.isNaN(t)) return null;
+  return typeof v === "string" ? v : new Date(t).toISOString();
 }
 
 function entryPath(entry: unknown): string {

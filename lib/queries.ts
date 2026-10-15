@@ -8,8 +8,9 @@ export interface RoomHeader {
 }
 export interface DeliverableRow {
   deliverable_id: string; deliverable_title: string; description: string | null;
-  version_id: string; version_no: number; status: string; shared_at: string | null;
-  change_summary: string | null; screens: { id: string; name: string }[];
+  kind?: string; welcome_message?: string | null;
+  version_id: string; version_no: number; status: string; shared_at: string | null; created_at?: string | Date | null;
+  change_summary: string | null; screens: { id: string; name: string }[] | null; document?: unknown;
 }
 export interface PreviewRow { storage_prefix: string; entry: string | null; deliverable_id: string; version_no: number }
 

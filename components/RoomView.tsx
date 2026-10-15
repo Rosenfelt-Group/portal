@@ -1,12 +1,24 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { main, button, card } from "./room-styles";
+import { formatVersionDate } from "@/lib/format";
 
 export interface Version {
-  id: string; version_no: number; status: string; shared_at: string | null;
+  id: string; version_no: number; status: string; shared_at: string | null; created_at: string | null;
   change_summary: string | null; screens: { id: string; name: string }[];
+  document: { filename: string; ext: string; size: number } | null;
 }
-interface Deliverable { id: string; title: string; description: string | null; versions: Version[] }
+interface Deliverable { id: string; title: string; description: string | null; kind: "prototype" | "document"; welcome_message: string | null; versions: Version[] }
+
+export function versionLabel(v: Version, timeZone?: string): string {
+  const date = v.created_at ? formatVersionDate(v.created_at, timeZone) : "";
+  return `v${v.version_no}${date ? ` · ${date}` : ""}${v.status === "superseded" ? " (older)" : ""}`;
+}
+
+// Plain text only: React escapes it; pre-line keeps the line breaks Brian typed.
+export function WelcomeNote({ text }: { text: string }) {
+  return <p style={{ whiteSpace: "pre-line", margin: "0.25rem 0 0.75rem" }}>{text}</p>;
+}
 
 export function welcomeText(relationship: string): string {
   switch (relationship) {
@@ -29,12 +41,13 @@ export function sortVersions(versions: Version[]): Version[] {
   return [...versions].sort((a, b) => b.version_no - a.version_no);
 }
 
+// Sized to the viewport: a sandboxed cross-origin frame cannot be measured, so a prototype taller than the window still scrolls inside the frame.
 export function PreviewFrame({ url }: { url: string }) {
   return (
     // SECURITY: never add allow-same-origin (or top-navigation, popups, modals, downloads) here.
     <iframe src={url} sandbox="allow-scripts allow-forms" referrerPolicy="no-referrer"
       title="Prototype preview"
-      style={{ width: "100%", height: "70vh", border: "1px solid #d0d5dd", borderRadius: 8 }} />
+      style={{ width: "100%", height: "calc(100dvh - 2rem)", minHeight: 480, border: "1px solid #d0d5dd", borderRadius: 8 }} />
   );
 }
 
@@ -76,10 +89,11 @@ function SolutionCard({ d, onSessionEnded }: { d: Deliverable; onSessionEnded: (
     <section style={card}>
       <h2 style={{ marginTop: 0 }}>{d.title}</h2>
       {d.description && <p>{d.description}</p>}
+      {d.welcome_message && <WelcomeNote text={d.welcome_message} />}
       <label htmlFor={`ver-${d.id}`} style={{ fontWeight: 600 }}>Version </label>
       <select id={`ver-${d.id}`} value={versionId} onChange={e => setVersionId(e.target.value)}>
         {versions.map(v => (
-          <option key={v.id} value={v.id}>{`v${v.version_no}${v.status === "superseded" ? " (older)" : ""}`}</option>
+          <option key={v.id} value={v.id}>{versionLabel(v)}</option>
         ))}
       </select>
       {current?.change_summary && <p>{current.change_summary}</p>}
@@ -139,7 +153,7 @@ export function RoomView({ title, orgName, relationship, contactName }: {
       {items && items.length === 0 && (
         <p>Nothing has been shared yet. We&apos;ll let you know when there&apos;s something to review.</p>
       )}
-      {items?.map(d => <SolutionCard key={d.id} d={d} onSessionEnded={onSessionEnded} />)}
+      {items?.map(d => d.kind === "document" ? null : <SolutionCard key={d.id} d={d} onSessionEnded={onSessionEnded} />)}
     </main>
   );
 }

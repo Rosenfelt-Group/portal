@@ -37,7 +37,7 @@ describe("room view helpers", () => {
   });
 });
 
-import { PreviewFrame, sortVersions, type Version } from "@/components/RoomView";
+import { PreviewFrame, sortVersions, versionLabel, WelcomeNote, type Version } from "@/components/RoomView";
 import nextConfig from "@/next.config";
 
 describe("preview frame", () => {
@@ -47,6 +47,8 @@ describe("preview frame", () => {
     expect(html).toContain('referrerPolicy="no-referrer"');
     expect(html).not.toContain("allow-same-origin");
     expect(html).toContain('src="https://preview.rosably.com/v/g/index.html"');
+    expect(html).toContain("height:calc(100dvh - 2rem)");
+    expect(html).toContain("min-height:480px");
   });
 });
 
@@ -54,6 +56,26 @@ describe("sortVersions", () => {
   it("orders newest first numerically", () => {
     const v = (n: number) => ({ id: String(n), version_no: n } as Version);
     expect(sortVersions([v(9), v(10), v(2)]).map(x => x.version_no)).toEqual([10, 9, 2]);
+  });
+});
+
+describe("version label and welcome note", () => {
+  const v = { id: "1", version_no: 3, status: "superseded", shared_at: null, created_at: "2026-10-14T12:00:00Z", change_summary: null, screens: [], document: null } as Version;
+  it("labels versions with number, date and older marker", () => {
+    expect(versionLabel(v, "UTC")).toBe("v3 · Oct 14, 2026 (older)");
+    expect(versionLabel({ ...v, status: "shared", created_at: null } as unknown as Version, "UTC")).toBe("v3");
+  });
+  it("omits the date for an invalid created_at", () => {
+    const label = versionLabel({ ...v, status: "shared", created_at: "garbage" }, "UTC");
+    expect(label).toBe("v3");
+    expect(label).not.toContain("Invalid");
+  });
+  it("renders the welcome message as text with line breaks, never as HTML", () => {
+    const html = renderToStaticMarkup(<WelcomeNote text={"Hello\n<b>there</b><script>x</script>"} />);
+    expect(html).toContain("&lt;b&gt;there&lt;/b&gt;&lt;script&gt;");
+    expect(html).not.toContain("<b>");
+    expect(html).not.toContain("<script>");
+    expect(html).toContain("white-space:pre-line");
   });
 });
 

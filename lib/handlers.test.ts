@@ -147,6 +147,53 @@ describe("handleDeliverables", () => {
     expect(JSON.stringify(body)).not.toContain("storage_prefix");
     expect(r.headers.get("cache-control")).toBe("private, no-store");
   });
+  it("returns kind, welcome message, created_at and safe document info, and nothing internal", async () => {
+    const rows = [
+      { deliverable_id: "d2", deliverable_title: "Proposal", description: null, kind: "document", welcome_message: "Hi\n<b>there</b>",
+        version_id: "v9", version_no: 1, status: "shared", shared_at: "2026-10-14T10:00:00Z", created_at: "2026-10-14T09:00:00Z",
+        change_summary: null, screens: [], document: { filename: "Proposal.pdf", ext: "pdf", size: 1234, extra: "x" }, storage_prefix: "SECRET" },
+      { deliverable_id: "d1", deliverable_title: "App", description: null, kind: "prototype", welcome_message: null,
+        version_id: "v1", version_no: 1, status: "shared", shared_at: null, created_at: "2026-10-13T09:00:00Z",
+        change_summary: null, screens: [], document: null },
+    ];
+    const { d } = deps((t) => (t.includes("portal_session") ? [{ ...header, contact_id: C }] : rows));
+    const body = await (await handleDeliverables(goodCookie({ cid: C }), d)).json();
+    expect(body.deliverables[0]).toMatchObject({ id: "d2", kind: "document", welcome_message: "Hi\n<b>there</b>" });
+    expect(body.deliverables[0].versions[0]).toMatchObject({ created_at: "2026-10-14T09:00:00Z", document: { filename: "Proposal.pdf", ext: "pdf", size: 1234 } });
+    expect(body.deliverables[0].versions[0].document).not.toHaveProperty("extra");
+    expect(body.deliverables[1]).toMatchObject({ kind: "prototype", welcome_message: null });
+    expect(body.deliverables[1].versions[0].document).toBeNull();
+    expect(JSON.stringify(body)).not.toContain("SECRET");
+  });
+  it("defaults kind to prototype for rows from an older database function", async () => {
+    const rows = [{ deliverable_id: "d1", deliverable_title: "App", description: null, version_id: "v1", version_no: 1, status: "shared", shared_at: null, change_summary: null, screens: [] }];
+    const { d } = deps((t) => (t.includes("portal_session") ? [{ ...header, contact_id: C }] : rows));
+    const body = await (await handleDeliverables(goodCookie({ cid: C }), d)).json();
+    expect(body.deliverables[0]).toMatchObject({ kind: "prototype", welcome_message: null });
+    expect(body.deliverables[0].versions[0]).toMatchObject({ created_at: null, document: null });
+  });
+  it("survives hostile rows: bad created_at, Date objects, null screens on documents, odd welcome text", async () => {
+    const long = "x".repeat(1000);
+    const rows = [
+      { deliverable_id: "d1", deliverable_title: "A", description: null, kind: "document", welcome_message: `<script>alert(1)</script>\r\n${long}`,
+        version_id: "v1", version_no: 1, status: "shared", shared_at: null, created_at: "garbage", change_summary: null, screens: null, document: { filename: 5, ext: "pdf", size: 1 } },
+      { deliverable_id: "d1", deliverable_title: "A", description: null, kind: "weird", welcome_message: 42,
+        version_id: "v2", version_no: 2, status: "shared", shared_at: null, created_at: new Date("2026-10-14T09:00:00Z"), change_summary: null, screens: null, document: "str" },
+      { deliverable_id: "d1", deliverable_title: "A", description: null, version_id: "v3", version_no: 3, status: "shared", shared_at: null,
+        created_at: new Date("nope"), change_summary: null, screens: [], document: null },
+    ];
+    const { d } = deps((t) => (t.includes("portal_session") ? [{ ...header, contact_id: C }] : rows));
+    const r = await handleDeliverables(goodCookie({ cid: C }), d);
+    expect(r.status).toBe(200);
+    const body = await r.json();
+    const dl = body.deliverables[0];
+    expect(dl.kind).toBe("document");
+    expect(dl.welcome_message).toContain("<script>");
+    const [v1, v2, v3] = dl.versions;
+    expect(v1).toMatchObject({ created_at: null, screens: [], document: null });
+    expect(v2).toMatchObject({ created_at: "2026-10-14T09:00:00.000Z", screens: [], document: null });
+    expect(v3.created_at).toBeNull();
+  });
 });
 
 describe("handlePreviewUrl", () => {
