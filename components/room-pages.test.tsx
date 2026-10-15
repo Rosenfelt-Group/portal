@@ -8,6 +8,8 @@ describe("link-expired page", () => {
   const html = renderToStaticMarkup(<LinkExpired />);
   it("is friendly, links home, and reveals no reason", () => {
     expect(html).toContain("This link isn&#x27;t working");
+    expect(html).toContain("session ended after a period of inactivity");
+    expect(html).toContain("open your original room link again");
     expect(html).toContain('href="https://rosably.com"');
     expect(html.toLowerCase()).not.toMatch(/revoked|expired because|invalid token|not found in/);
     expect(html).not.toContain("<script");

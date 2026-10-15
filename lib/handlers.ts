@@ -3,7 +3,7 @@ import { openRoom, getSessionRow, identify, listDeliverables, versionForPreview,
 import { isTokenShape, hashToken } from "./token";
 import { signSession, verifySession, sessionExpiry, setCookieHeader, type SessionPayload } from "./session";
 import { isSameOriginJson } from "./guards";
-import { signGrant, signDocGrant, GRANT_TTL_SEC } from "./grant";
+import { signGrant, signDocGrant, isSafeDocFilename, GRANT_TTL_SEC } from "./grant";
 
 export interface Deps {
   q: Q; sessionSecret: string; grantSecret: string; previewUrl: string; portalOrigin: string; now?: () => number;
@@ -72,7 +72,7 @@ export async function handleIdentify(req: Request, cookie: string | undefined, d
   let body: unknown;
   try { body = await req.json(); } catch { body = null; }
   const b = body as { name?: unknown; email?: unknown } | null;
-  const bad = () => json({ error: "Please check your name and email." }, 400);
+  const bad = () => json({ error: "Please check your name and email." }, 400, { "Set-Cookie": sess.renewed });
   if (!b || typeof b !== "object" || typeof b.name !== "string" || typeof b.email !== "string") return bad();
   if (b.name.length > 200 || b.email.length > 300) return bad();
   let cid: string | null;
@@ -144,10 +144,17 @@ export async function handlePreviewUrl(cookie: string | undefined, versionId: st
 }
 
 // The download name must end in the stored file's extension (document.<ext>); otherwise use the stored name.
+// The extension is compared after normalisation (.jpeg == .jpg, case-insensitive).
+function normExt(name: string): string | null {
+  const m = /\.([A-Za-z0-9]{1,5})$/.exec(name);
+  if (!m) return null;
+  const e = m[1].toLowerCase();
+  return e === "jpeg" ? "jpg" : e;
+}
 function downloadName(file: string, filename: unknown): string {
-  const ext = file.slice(file.lastIndexOf(".")).toLowerCase();
-  if (typeof filename === "string" && filename.length > ext.length && filename.slice(-ext.length).toLowerCase() === ext) return filename;
-  return file;
+  if (!isSafeDocFilename(filename)) return file;
+  const want = normExt(file);
+  return want !== null && normExt(filename) === want ? filename : file;
 }
 
 // POST: a 2-minute download URL on the preview host for a shared document. The portal never touches
